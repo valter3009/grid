@@ -325,13 +325,18 @@ class MEXCService:
             if not order:
                 raise MEXCError("Exchange returned empty response")
 
+            # Safely extract fee information (fee can be None)
+            fee_info = order.get('fee', {}) or {}
+            fee_cost = parse_decimal(fee_info.get('cost', 0))
+            fee_currency = fee_info.get('currency', 'USDT')
+
             return {
                 'order_id': str(order['id']),
                 'status': order['status'],
                 'filled': parse_decimal(order.get('filled', 0)),
                 'remaining': parse_decimal(order.get('remaining', amount)),
-                'fee': parse_decimal(order.get('fee', {}).get('cost', 0)),
-                'fee_currency': order.get('fee', {}).get('currency', 'USDT'),
+                'fee': fee_cost,
+                'fee_currency': fee_currency,
                 'timestamp': order.get('timestamp'),
                 'price': parse_decimal(order.get('price', price)),
                 'amount': parse_decimal(order.get('amount', amount)),
@@ -401,13 +406,18 @@ class MEXCService:
             if not order or not isinstance(order, dict):
                 raise MEXCError("Exchange returned invalid response")
 
+            # Safely extract fee information (fee can be None)
+            fee_info = order.get('fee', {}) or {}
+            fee_cost = parse_decimal(fee_info.get('cost', 0))
+            fee_currency = fee_info.get('currency', 'USDT')
+
             return {
                 'order_id': str(order['id']),
                 'status': order['status'],
                 'filled': parse_decimal(order.get('filled', 0)),
                 'average_price': parse_decimal(order.get('average', 0)),
-                'fee': parse_decimal(order.get('fee', {}).get('cost', 0)),
-                'fee_currency': order.get('fee', {}).get('currency', 'USDT'),
+                'fee': fee_cost,
+                'fee_currency': fee_currency,
                 'timestamp': order.get('timestamp'),
                 'amount': parse_decimal(order.get('amount', amount)),
             }

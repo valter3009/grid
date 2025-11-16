@@ -30,6 +30,7 @@ async def cmd_start(message: Message, db: AsyncSession):
             # Create new user
             user = User(
                 telegram_id=message.from_user.id,
+                telegram_chat_id=message.chat.id,
                 username=message.from_user.username,
                 first_name=message.from_user.first_name,
                 last_name=message.from_user.last_name
@@ -57,6 +58,7 @@ async def cmd_start(message: Message, db: AsyncSession):
 
         else:
             # Update user info
+            user.telegram_chat_id = message.chat.id
             user.username = message.from_user.username
             user.first_name = message.from_user.first_name
             user.last_name = message.from_user.last_name
