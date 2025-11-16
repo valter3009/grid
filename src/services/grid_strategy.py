@@ -290,17 +290,22 @@ class GridStrategy:
                     buy_amount = total_sell_amount * Decimal('1.01')
                     buy_amount = round_down(buy_amount, amount_precision)
 
+                    # For market buy, we need to pass cost in quote currency (USDT)
+                    # MEXC requires cost = amount * price for market buy orders
+                    cost = buy_amount * current_price
+                    cost = round_down(cost, 2)  # USDT has 2 decimals precision
+
                     logger.info(
                         f"Buying {buy_amount} {bot.symbol.split('/')[0]} for sell orders "
-                        f"(needed: {total_sell_amount})"
+                        f"(cost: ${cost}, needed: {total_sell_amount})"
                     )
 
-                    # Buy base currency at market price
+                    # Buy base currency at market price (pass cost, not amount)
                     market_order = await self.mexc.create_market_order(
                         user_id=bot.user_id,
                         symbol=bot.symbol,
                         side='buy',
-                        amount=buy_amount
+                        amount=cost  # Pass cost in USDT for market buy
                     )
 
                     logger.info(
