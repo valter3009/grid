@@ -12,4 +12,7 @@ COPY . .
 # Create logs directory
 RUN mkdir -p logs
 
+# Set Python path
+ENV PYTHONPATH=/app
+
 CMD ["python", "src/main.py"]
