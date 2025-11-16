@@ -40,7 +40,6 @@ services:
         condition: service_healthy
     volumes:
       - ./logs:/app/logs
-      - ./src:/app/src
     restart: unless-stopped
 
 volumes:
