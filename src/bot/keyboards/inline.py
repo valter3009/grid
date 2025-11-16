@@ -165,6 +165,9 @@ def get_bot_details_keyboard(grid_bot_id: int, status: str) -> InlineKeyboardMar
             InlineKeyboardButton(text="🔄 Обновить", callback_data=f"bot_refresh:{grid_bot_id}")
         ],
         [
+            InlineKeyboardButton(text="🗑 Удалить бота", callback_data=f"bot_delete:{grid_bot_id}")
+        ],
+        [
             InlineKeyboardButton(text="◀️ Назад", callback_data="my_bots")
         ]
     ])
@@ -213,6 +216,21 @@ def get_stop_bot_keyboard(grid_bot_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 text="💰 Остановить и продать всё",
                 callback_data=f"stop_confirm:{grid_bot_id}:sell"
+            )
+        ],
+        [
+            InlineKeyboardButton(text="❌ Отмена", callback_data=f"bot_details:{grid_bot_id}")
+        ]
+    ])
+
+
+def get_delete_bot_keyboard(grid_bot_id: int) -> InlineKeyboardMarkup:
+    """Get delete bot confirmation keyboard."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="🗑 Да, удалить бота",
+                callback_data=f"delete_confirm:{grid_bot_id}"
             )
         ],
         [

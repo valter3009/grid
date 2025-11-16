@@ -15,6 +15,7 @@ from src.bot.keyboards.inline import (
     get_my_bots_keyboard,
     get_bot_details_keyboard,
     get_stop_bot_keyboard,
+    get_delete_bot_keyboard,
     get_back_button
 )
 
@@ -321,6 +322,88 @@ async def stop_bot(callback: CallbackQuery, db: AsyncSession):
         logger.error(f"Error stopping bot: {e}", exc_info=True)
         await callback.message.edit_text(
             "❌ Произошла ошибка при остановке бота",
+            reply_markup=get_back_button("my_bots")
+        )
+        await callback.answer()
+
+
+@router.callback_query(F.data.startswith("bot_delete:"))
+async def confirm_delete_bot(callback: CallbackQuery, db: AsyncSession):
+    """Show confirmation for deleting bot."""
+    try:
+        bot_id = int(callback.data.split(":")[1])
+
+        text = (
+            "🗑 Удаление бота\n\n"
+            "⚠️ Внимание! Это действие необратимо.\n\n"
+            "При удалении бота:\n"
+            "• Будут отменены все активные ордера на бирже\n"
+            "• Бот будет полностью удален из списка\n"
+            "• Вся статистика и история будут потеряны\n\n"
+            "Вы уверены, что хотите удалить этот бот?"
+        )
+
+        await callback.message.edit_text(
+            text,
+            reply_markup=get_delete_bot_keyboard(bot_id)
+        )
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"Error showing delete confirmation: {e}", exc_info=True)
+        await callback.answer("Ошибка")
+
+
+@router.callback_query(F.data.startswith("delete_confirm:"))
+async def delete_bot(callback: CallbackQuery, db: AsyncSession):
+    """Delete a bot completely."""
+    try:
+        bot_id = int(callback.data.split(":")[1])
+
+        # Get bot
+        result = await db.execute(
+            select(GridBot).where(GridBot.id == bot_id)
+        )
+        bot = result.scalar_one_or_none()
+
+        if not bot:
+            await callback.answer("Бот не найден")
+            return
+
+        # Show progress message
+        await callback.message.edit_text(
+            "⏳ Удаляю бота...\n"
+            "Это может занять некоторое время.",
+            reply_markup=None
+        )
+        await callback.answer()
+
+        # Initialize services
+        mexc_service = MEXCService(db)
+        grid_strategy = GridStrategy(db, mexc_service)
+        bot_manager = BotManager(db, mexc_service, grid_strategy)
+
+        # Delete bot
+        success = await bot_manager.delete_bot(bot_id)
+
+        if success:
+            await callback.message.edit_text(
+                "✅ Бот успешно удален\n\n"
+                "Все ордера отменены, данные удалены.",
+                reply_markup=get_back_button("my_bots")
+            )
+            logger.info(f"Bot {bot_id} deleted")
+        else:
+            await callback.message.edit_text(
+                "❌ Ошибка при удалении бота\n\n"
+                "Попробуйте позже или обратитесь в поддержку.",
+                reply_markup=get_back_button("my_bots")
+            )
+
+    except Exception as e:
+        logger.error(f"Error deleting bot: {e}", exc_info=True)
+        await callback.message.edit_text(
+            "❌ Ошибка при удалении бота",
             reply_markup=get_back_button("my_bots")
         )
         await callback.answer()

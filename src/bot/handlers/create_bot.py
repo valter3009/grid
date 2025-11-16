@@ -613,6 +613,9 @@ async def confirm_and_start_bot(callback: CallbackQuery, state: FSMContext, db: 
             await state.clear()
             return
 
+        # Answer callback immediately to avoid timeout
+        await callback.answer()
+
         # Show progress
         await callback.message.edit_text(
             "⏳ Создаю бота и размещаю ордера...\n"
@@ -640,8 +643,12 @@ async def confirm_and_start_bot(callback: CallbackQuery, state: FSMContext, db: 
                 "✅ Grid бот успешно создан и запущен!\n\n"
                 f"🤖 Бот #{grid_bot.id}\n"
                 f"📈 {data['display_symbol']}\n"
-                f"💰 Инвестиция: ${data['investment_amount']:.2f}\n\n"
-                f"Бот начал работу. Вы будете получать уведомления о прибыли.\n\n"
+                f"💰 Инвестиция: ${data['investment_amount']:.2f}\n"
+                f"🔢 Уровней сетки: {data['grid_levels']}\n\n"
+                f"📊 Режим: Neutral Grid\n"
+                f"• Buy ордера размещены ниже текущей цены\n"
+                f"• Sell ордера размещены выше текущей цены\n\n"
+                f"💡 Бот начнет зарабатывать когда цена будет двигаться в диапазоне сетки.\n\n"
                 f"Просмотреть статус: 📊 Мои боты",
                 reply_markup=get_back_button("main_menu")
             )
@@ -658,17 +665,23 @@ async def confirm_and_start_bot(callback: CallbackQuery, state: FSMContext, db: 
             )
 
         await state.clear()
-        await callback.answer()
 
     except Exception as e:
         logger.error(f"Error creating bot: {e}", exc_info=True)
-        await callback.message.edit_text(
-            "❌ Произошла ошибка при создании бота\n\n"
-            "Попробуйте позже.",
-            reply_markup=get_back_button("main_menu")
-        )
+        try:
+            await callback.message.edit_text(
+                "❌ Произошла ошибка при создании бота\n\n"
+                "Попробуйте позже.",
+                reply_markup=get_back_button("main_menu")
+            )
+        except Exception:
+            # If edit fails, send new message
+            await callback.message.answer(
+                "❌ Произошла ошибка при создании бота\n\n"
+                "Попробуйте позже.",
+                reply_markup=get_back_button("main_menu")
+            )
         await state.clear()
-        await callback.answer()
 
 
 @router.callback_query(F.data == "confirm:edit", CreateBotStates.confirmation)

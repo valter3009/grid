@@ -79,7 +79,8 @@ class GridStrategy:
         grid_levels: int,
         current_price: Decimal,
         price_levels: List[Decimal],
-        amount_precision: int = 8
+        amount_precision: int = 8,
+        min_order_amount: Decimal = Decimal('0')
     ) -> Dict[int, Decimal]:
         """
         Calculate order amounts for each grid level.
@@ -89,6 +90,7 @@ class GridStrategy:
         2. Divide investment_amount equally between orders
         3. For buy orders: amount = (investment / num_buys) / price
         4. For sell orders: amount = (investment / num_sells) / price
+        5. Ensure all amounts meet minimum order requirements
 
         Args:
             investment_amount: Total investment amount
@@ -96,6 +98,7 @@ class GridStrategy:
             current_price: Current market price
             price_levels: List of grid price levels
             amount_precision: Precision for amounts
+            min_order_amount: Minimum order amount from exchange
 
         Returns:
             Dictionary {level_index: amount_in_base_currency}
@@ -121,14 +124,34 @@ class GridStrategy:
             for i in range(current_level_idx):
                 price = price_levels[i]
                 amount = (half_investment / Decimal(str(num_buy_levels))) / price
-                amounts[i] = round_down(amount, amount_precision)
+                amount = round_down(amount, amount_precision)
+
+                # Ensure amount meets minimum requirement
+                if amount < min_order_amount:
+                    logger.warning(
+                        f"Calculated amount {amount} is less than minimum {min_order_amount}, "
+                        f"using minimum amount"
+                    )
+                    amount = min_order_amount
+
+                amounts[i] = amount
 
         # Calculate amounts for sell orders (above current price)
         if num_sell_levels > 0:
             for i in range(current_level_idx + 1, len(price_levels)):
                 price = price_levels[i]
                 amount = (half_investment / Decimal(str(num_sell_levels))) / price
-                amounts[i] = round_down(amount, amount_precision)
+                amount = round_down(amount, amount_precision)
+
+                # Ensure amount meets minimum requirement
+                if amount < min_order_amount:
+                    logger.warning(
+                        f"Calculated amount {amount} is less than minimum {min_order_amount}, "
+                        f"using minimum amount"
+                    )
+                    amount = min_order_amount
+
+                amounts[i] = amount
 
         return amounts
 
@@ -178,6 +201,14 @@ class GridStrategy:
             exchange_info = await self.mexc.get_exchange_info(bot.symbol)
             amount_precision = exchange_info['amount_precision']
             price_precision = exchange_info['price_precision']
+            min_order_amount = exchange_info['min_order_amount']
+
+            logger.info(
+                f"Exchange info for {bot.symbol}: "
+                f"min_amount={min_order_amount}, "
+                f"amount_precision={amount_precision}, "
+                f"price_precision={price_precision}"
+            )
 
             # Calculate grid levels
             price_levels = self.calculate_grid_levels(
@@ -193,7 +224,8 @@ class GridStrategy:
                 bot.grid_levels,
                 current_price,
                 price_levels,
-                amount_precision
+                amount_precision,
+                min_order_amount
             )
 
             # Find current level
@@ -245,75 +277,89 @@ class GridStrategy:
                         logger.error(f"Failed to create buy order at level {level_idx}: {e}")
                         # Continue with other orders
 
-            # Buy asset at MARKET for sell orders
-            half_investment = bot.investment_amount / Decimal('2')
-            market_buy_amount = half_investment / current_price
-            market_buy_amount = round_down(market_buy_amount, amount_precision)
-
-            try:
-                market_order = await self.mexc.create_market_order(
-                    user_id=bot.user_id,
-                    symbol=bot.symbol,
-                    side='buy',
-                    amount=market_buy_amount
-                )
-
-                # Log market order
-                log_entry = BotLog.create_info(
-                    message=f"Market buy: {market_buy_amount} @ ~{current_price}",
-                    grid_bot_id=grid_bot_id,
-                    user_id=bot.user_id,
-                    details={
-                        'order_id': market_order['order_id'],
-                        'amount': str(market_buy_amount),
-                        'average_price': str(market_order.get('average_price', current_price))
-                    }
-                )
-                self.db.add(log_entry)
-
-                logger.info(f"Market buy executed: {market_buy_amount}")
-
-            except MEXCError as e:
-                logger.error(f"Failed to create market buy order: {e}")
-                raise GridStrategyError(f"Не удалось купить актив: {e}")
-
-            # Create SELL limit orders above current price
+            # Calculate total amount needed for sell orders
+            total_sell_amount = Decimal('0')
             for level_idx, amount in order_amounts.items():
                 if level_idx > current_level_idx:
-                    price = round_down(price_levels[level_idx], price_precision)
+                    total_sell_amount += amount
 
-                    try:
-                        order = await self.mexc.create_limit_order(
-                            user_id=bot.user_id,
-                            symbol=bot.symbol,
-                            side='sell',
-                            price=price,
-                            amount=amount
-                        )
+            # Buy base currency for sell orders if needed
+            if total_sell_amount > 0:
+                try:
+                    # Add 1% buffer for safety
+                    buy_amount = total_sell_amount * Decimal('1.01')
+                    buy_amount = round_down(buy_amount, amount_precision)
 
-                        # Save to DB
-                        db_order = GridOrder(
-                            grid_bot_id=grid_bot_id,
-                            exchange_order_id=order['order_id'],
-                            side='sell',
-                            order_type='limit',
-                            level=level_idx,
-                            price=price,
-                            amount=amount,
-                            total=price * amount,
-                            status='open'
-                        )
-                        self.db.add(db_order)
-                        sell_orders.append(order)
+                    # For market buy, we need to pass cost in quote currency (USDT)
+                    # MEXC requires cost = amount * price for market buy orders
+                    cost = buy_amount * current_price
+                    cost = round_down(cost, 2)  # USDT has 2 decimals precision
 
-                        logger.info(
-                            f"Created sell order at level {level_idx}: "
-                            f"{amount} @ {price}"
-                        )
+                    logger.info(
+                        f"Buying {buy_amount} {bot.symbol.split('/')[0]} for sell orders "
+                        f"(cost: ${cost}, needed: {total_sell_amount})"
+                    )
 
-                    except MEXCError as e:
-                        logger.error(f"Failed to create sell order at level {level_idx}: {e}")
-                        # Continue with other orders
+                    # Buy base currency at market price (pass cost, not amount)
+                    market_order = await self.mexc.create_market_order(
+                        user_id=bot.user_id,
+                        symbol=bot.symbol,
+                        side='buy',
+                        amount=cost  # Pass cost in USDT for market buy
+                    )
+
+                    logger.info(
+                        f"Bought {buy_amount} at market price: "
+                        f"{market_order.get('average_price', 'N/A')}"
+                    )
+
+                except MEXCError as e:
+                    logger.error(f"Failed to buy base currency for sell orders: {e}")
+                    # If we can't buy base currency, we can't create sell orders
+                    # But we still have buy orders created, so bot is partially functional
+                    logger.warning("Sell orders will not be created due to market buy failure")
+                    total_sell_amount = Decimal('0')  # Skip sell order creation
+
+            # Create SELL limit orders above current price
+            # In Grid trading, we place sell orders above current price
+            # They will be filled when price goes up, then we create buy orders
+            if total_sell_amount > 0:
+                for level_idx, amount in order_amounts.items():
+                    if level_idx > current_level_idx:
+                        price = round_down(price_levels[level_idx], price_precision)
+
+                        try:
+                            order = await self.mexc.create_limit_order(
+                                user_id=bot.user_id,
+                                symbol=bot.symbol,
+                                side='sell',
+                                price=price,
+                                amount=amount
+                            )
+
+                            # Save to DB
+                            db_order = GridOrder(
+                                grid_bot_id=grid_bot_id,
+                                exchange_order_id=order['order_id'],
+                                side='sell',
+                                order_type='limit',
+                                level=level_idx,
+                                price=price,
+                                amount=amount,
+                                total=price * amount,
+                                status='open'
+                            )
+                            self.db.add(db_order)
+                            sell_orders.append(order)
+
+                            logger.info(
+                                f"Created sell order at level {level_idx}: "
+                                f"{amount} @ {price}"
+                            )
+
+                        except MEXCError as e:
+                            logger.error(f"Failed to create sell order at level {level_idx}: {e}")
+                            # Continue with other orders
 
             # Commit all orders to DB
             await self.db.commit()

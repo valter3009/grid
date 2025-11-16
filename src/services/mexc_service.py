@@ -63,6 +63,7 @@ class MEXCService:
             'enableRateLimit': True,
             'options': {
                 'defaultType': 'spot',  # Only spot trading
+                'createMarketBuyOrderRequiresPrice': False,  # For MEXC market buy orders
             }
         })
 
@@ -353,7 +354,8 @@ class MEXCService:
         user_id: int,
         symbol: str,
         side: str,
-        amount: Decimal
+        amount: Decimal,
+        price: Decimal = None
     ) -> dict:
         """
         Create market order on MEXC.
@@ -362,7 +364,8 @@ class MEXCService:
             user_id: User ID
             symbol: Trading pair
             side: 'buy' or 'sell'
-            amount: Order amount
+            amount: Order amount (for sell) or cost in quote currency (for buy)
+            price: Current price (used for buy orders to calculate cost)
 
         Returns:
             Order details dict
@@ -370,14 +373,19 @@ class MEXCService:
         Raises:
             MEXCError: If order creation fails
         """
+        exchange = None
         try:
             exchange = await self._get_exchange(user_id)
+
+            # For market buy on MEXC, we need to pass cost (amount * price) as the amount parameter
+            # when createMarketBuyOrderRequiresPrice is False
+            order_amount = float(amount)
 
             order = await retry_async(
                 exchange.create_market_order,
                 symbol,
                 side,
-                float(amount),
+                order_amount,
                 max_retries=2,
                 exceptions=(ccxt.NetworkError,)
             )
@@ -401,6 +409,10 @@ class MEXCService:
             logger.error(f"Error creating market order: {e}")
             raise MEXCError(f"Ошибка создания рыночного ордера: {str(e)}")
 
+        finally:
+            if exchange:
+                await exchange.close()
+
     async def cancel_order(self, user_id: int, symbol: str, order_id: str) -> bool:
         """
         Cancel order on MEXC.
@@ -416,6 +428,7 @@ class MEXCService:
         Raises:
             MEXCError: If cancellation fails
         """
+        exchange = None
         try:
             exchange = await self._get_exchange(user_id)
 
@@ -427,6 +440,7 @@ class MEXCService:
                 exceptions=(ccxt.NetworkError,)
             )
 
+            logger.info(f"Cancelled order {order_id} for {symbol}")
             return True
 
         except ccxt.OrderNotFound as e:
@@ -436,6 +450,10 @@ class MEXCService:
         except Exception as e:
             logger.error(f"Error cancelling order {order_id}: {e}")
             raise MEXCError(f"Ошибка отмены ордера: {str(e)}")
+
+        finally:
+            if exchange:
+                await exchange.close()
 
     async def get_order_status(self, user_id: int, symbol: str, order_id: str) -> dict:
         """
