@@ -1,0 +1,29 @@
+# Core
+python-dotenv==1.0.0
+
+# Telegram
+aiogram==3.4.1
+
+# Database
+sqlalchemy==2.0.25
+asyncpg==0.29.0
+alembic==1.13.1
+
+# Exchange
+ccxt==4.2.25
+
+# Security
+cryptography==42.0.2
+
+# Background tasks
+APScheduler==3.10.4
+
+# Cache
+redis==5.0.1
+
+# Utils
+python-dateutil==2.8.2
+
+# Testing
+pytest==7.4.3
+pytest-asyncio==0.23.3

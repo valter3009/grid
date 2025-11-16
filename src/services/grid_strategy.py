@@ -1,0 +1,546 @@
+"""Grid Trading Strategy implementation."""
+from decimal import Decimal
+from typing import List, Dict, Optional, Tuple
+from datetime import datetime
+import logging
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.models.grid_bot import GridBot
+from src.models.order import GridOrder
+from src.models.bot_log import BotLog
+from src.services.mexc_service import MEXCService, MEXCError
+from src.utils.helpers import parse_decimal, round_down, split_symbol
+from src.utils.validators import validate_price_range, validate_grid_levels
+
+logger = logging.getLogger(__name__)
+
+
+class GridStrategyError(Exception):
+    """Grid strategy error."""
+    pass
+
+
+class GridStrategy:
+    """Grid Trading strategy implementation."""
+
+    def __init__(self, db: AsyncSession, mexc_service: MEXCService):
+        """Initialize grid strategy."""
+        self.db = db
+        self.mexc = mexc_service
+
+    @staticmethod
+    def calculate_grid_levels(
+        lower_price: Decimal,
+        upper_price: Decimal,
+        grid_levels: int,
+        grid_type: str = 'arithmetic'
+    ) -> List[Decimal]:
+        """
+        Calculate grid price levels.
+
+        For MVP only arithmetic (equal intervals):
+        step = (upper_price - lower_price) / grid_levels
+        levels = [lower_price + step * i for i in range(grid_levels + 1)]
+
+        Args:
+            lower_price: Lower boundary price
+            upper_price: Upper boundary price
+            grid_levels: Number of grid levels
+            grid_type: Grid type (only 'arithmetic' for MVP)
+
+        Returns:
+            List of price levels
+
+        Raises:
+            GridStrategyError: If grid type is not supported
+        """
+        # Validate inputs
+        validate_price_range(lower_price, upper_price)
+        validate_grid_levels(grid_levels)
+
+        if grid_type != 'arithmetic':
+            raise GridStrategyError("Только arithmetic grid поддерживается в MVP")
+
+        # Calculate step
+        step = (upper_price - lower_price) / Decimal(str(grid_levels))
+
+        # Generate levels
+        levels = []
+        for i in range(grid_levels + 1):
+            level = lower_price + (step * Decimal(str(i)))
+            levels.append(level)
+
+        return levels
+
+    @staticmethod
+    def calculate_order_amounts(
+        investment_amount: Decimal,
+        grid_levels: int,
+        current_price: Decimal,
+        price_levels: List[Decimal],
+        amount_precision: int = 8
+    ) -> Dict[int, Decimal]:
+        """
+        Calculate order amounts for each grid level.
+
+        Algorithm:
+        1. Determine number of buy and sell orders relative to current_price
+        2. Divide investment_amount equally between orders
+        3. For buy orders: amount = (investment / num_buys) / price
+        4. For sell orders: amount = (investment / num_sells) / price
+
+        Args:
+            investment_amount: Total investment amount
+            grid_levels: Number of grid levels
+            current_price: Current market price
+            price_levels: List of grid price levels
+            amount_precision: Precision for amounts
+
+        Returns:
+            Dictionary {level_index: amount_in_base_currency}
+        """
+        amounts = {}
+
+        # Find current level index
+        current_level_idx = 0
+        for i, price in enumerate(price_levels):
+            if price >= current_price:
+                current_level_idx = i
+                break
+
+        # Count buy and sell levels
+        num_buy_levels = current_level_idx
+        num_sell_levels = len(price_levels) - current_level_idx - 1
+
+        # Calculate investment per side (50/50 split)
+        half_investment = investment_amount / Decimal('2')
+
+        # Calculate amounts for buy orders (below current price)
+        if num_buy_levels > 0:
+            for i in range(current_level_idx):
+                price = price_levels[i]
+                amount = (half_investment / Decimal(str(num_buy_levels))) / price
+                amounts[i] = round_down(amount, amount_precision)
+
+        # Calculate amounts for sell orders (above current price)
+        if num_sell_levels > 0:
+            for i in range(current_level_idx + 1, len(price_levels)):
+                price = price_levels[i]
+                amount = (half_investment / Decimal(str(num_sell_levels))) / price
+                amounts[i] = round_down(amount, amount_precision)
+
+        return amounts
+
+    async def create_initial_orders(
+        self,
+        grid_bot_id: int,
+        current_price: Decimal
+    ) -> Dict[str, any]:
+        """
+        Create initial orders when starting grid bot.
+
+        IMPORTANT: Solution #3 - Buy asset at market price immediately.
+
+        Algorithm:
+        1. Get bot parameters from DB
+        2. Calculate grid levels
+        3. Determine current level (closest to current_price)
+        4. Create BUY limit orders BELOW current_price
+        5. Buy asset for SELL orders AT MARKET
+        6. Create SELL limit orders ABOVE current_price
+
+        Args:
+            grid_bot_id: Grid bot ID
+            current_price: Current market price
+
+        Returns:
+            {
+                'buy_orders': [...],
+                'sell_orders': [...],
+                'market_order': {...}
+            }
+
+        Raises:
+            GridStrategyError: If order creation fails
+        """
+        # Load bot from DB
+        result = await self.db.execute(
+            select(GridBot).where(GridBot.id == grid_bot_id)
+        )
+        bot = result.scalar_one_or_none()
+
+        if not bot:
+            raise GridStrategyError(f"Grid bot {grid_bot_id} not found")
+
+        try:
+            # Get exchange info
+            exchange_info = await self.mexc.get_exchange_info(bot.symbol)
+            amount_precision = exchange_info['amount_precision']
+            price_precision = exchange_info['price_precision']
+
+            # Calculate grid levels
+            price_levels = self.calculate_grid_levels(
+                bot.lower_price,
+                bot.upper_price,
+                bot.grid_levels,
+                bot.grid_type
+            )
+
+            # Calculate order amounts
+            order_amounts = self.calculate_order_amounts(
+                bot.investment_amount,
+                bot.grid_levels,
+                current_price,
+                price_levels,
+                amount_precision
+            )
+
+            # Find current level
+            current_level_idx = 0
+            for i, price in enumerate(price_levels):
+                if price >= current_price:
+                    current_level_idx = i
+                    break
+
+            buy_orders = []
+            sell_orders = []
+            market_order = None
+
+            # Create BUY limit orders below current price
+            for level_idx, amount in order_amounts.items():
+                if level_idx < current_level_idx:
+                    price = round_down(price_levels[level_idx], price_precision)
+
+                    try:
+                        order = await self.mexc.create_limit_order(
+                            user_id=bot.user_id,
+                            symbol=bot.symbol,
+                            side='buy',
+                            price=price,
+                            amount=amount
+                        )
+
+                        # Save to DB
+                        db_order = GridOrder(
+                            grid_bot_id=grid_bot_id,
+                            exchange_order_id=order['order_id'],
+                            side='buy',
+                            order_type='limit',
+                            level=level_idx,
+                            price=price,
+                            amount=amount,
+                            total=price * amount,
+                            status='open'
+                        )
+                        self.db.add(db_order)
+                        buy_orders.append(order)
+
+                        logger.info(
+                            f"Created buy order at level {level_idx}: "
+                            f"{amount} @ {price}"
+                        )
+
+                    except MEXCError as e:
+                        logger.error(f"Failed to create buy order at level {level_idx}: {e}")
+                        # Continue with other orders
+
+            # Buy asset at MARKET for sell orders
+            half_investment = bot.investment_amount / Decimal('2')
+            market_buy_amount = half_investment / current_price
+            market_buy_amount = round_down(market_buy_amount, amount_precision)
+
+            try:
+                market_order = await self.mexc.create_market_order(
+                    user_id=bot.user_id,
+                    symbol=bot.symbol,
+                    side='buy',
+                    amount=market_buy_amount
+                )
+
+                # Log market order
+                log_entry = BotLog.create_info(
+                    message=f"Market buy: {market_buy_amount} @ ~{current_price}",
+                    grid_bot_id=grid_bot_id,
+                    user_id=bot.user_id,
+                    details={
+                        'order_id': market_order['order_id'],
+                        'amount': str(market_buy_amount),
+                        'average_price': str(market_order.get('average_price', current_price))
+                    }
+                )
+                self.db.add(log_entry)
+
+                logger.info(f"Market buy executed: {market_buy_amount}")
+
+            except MEXCError as e:
+                logger.error(f"Failed to create market buy order: {e}")
+                raise GridStrategyError(f"Не удалось купить актив: {e}")
+
+            # Create SELL limit orders above current price
+            for level_idx, amount in order_amounts.items():
+                if level_idx > current_level_idx:
+                    price = round_down(price_levels[level_idx], price_precision)
+
+                    try:
+                        order = await self.mexc.create_limit_order(
+                            user_id=bot.user_id,
+                            symbol=bot.symbol,
+                            side='sell',
+                            price=price,
+                            amount=amount
+                        )
+
+                        # Save to DB
+                        db_order = GridOrder(
+                            grid_bot_id=grid_bot_id,
+                            exchange_order_id=order['order_id'],
+                            side='sell',
+                            order_type='limit',
+                            level=level_idx,
+                            price=price,
+                            amount=amount,
+                            total=price * amount,
+                            status='open'
+                        )
+                        self.db.add(db_order)
+                        sell_orders.append(order)
+
+                        logger.info(
+                            f"Created sell order at level {level_idx}: "
+                            f"{amount} @ {price}"
+                        )
+
+                    except MEXCError as e:
+                        logger.error(f"Failed to create sell order at level {level_idx}: {e}")
+                        # Continue with other orders
+
+            # Commit all orders to DB
+            await self.db.commit()
+
+            # Update bot statistics
+            bot.total_buy_orders = len(buy_orders)
+            bot.total_sell_orders = len(sell_orders)
+            await self.db.commit()
+
+            return {
+                'buy_orders': buy_orders,
+                'sell_orders': sell_orders,
+                'market_order': market_order,
+                'total_orders': len(buy_orders) + len(sell_orders)
+            }
+
+        except Exception as e:
+            logger.error(f"Error creating initial orders: {e}")
+            await self.db.rollback()
+            raise GridStrategyError(f"Ошибка создания ордеров: {str(e)}")
+
+    async def handle_filled_order(self, order_id: int) -> dict:
+        """
+        Handle filled order and create counter order.
+
+        Algorithm:
+        1. Load order from DB
+        2. Update status = 'filled', filled_at = NOW()
+        3. IF order.side == 'buy':
+               Create SELL order at next level up
+        4. ELIF order.side == 'sell':
+               Create BUY order at next level down
+               Calculate profit from cycle
+               Update bot statistics
+        5. Send notification to user
+
+        Args:
+            order_id: Order ID in database
+
+        Returns:
+            {
+                'new_order': {...},
+                'profit': Decimal (if sell),
+                'cycle_completed': bool
+            }
+
+        Raises:
+            GridStrategyError: If processing fails
+        """
+        # Load order from DB
+        result = await self.db.execute(
+            select(GridOrder).where(GridOrder.id == order_id)
+        )
+        order = result.scalar_one_or_none()
+
+        if not order:
+            raise GridStrategyError(f"Order {order_id} not found")
+
+        # Load bot
+        result = await self.db.execute(
+            select(GridBot).where(GridBot.id == order.grid_bot_id)
+        )
+        bot = result.scalar_one_or_none()
+
+        if not bot:
+            raise GridStrategyError(f"Grid bot {order.grid_bot_id} not found")
+
+        try:
+            # Update order status
+            order.status = 'filled'
+            order.filled_at = datetime.utcnow()
+
+            # Get exchange info
+            exchange_info = await self.mexc.get_exchange_info(bot.symbol)
+            amount_precision = exchange_info['amount_precision']
+            price_precision = exchange_info['price_precision']
+
+            # Calculate grid levels
+            price_levels = self.calculate_grid_levels(
+                bot.lower_price,
+                bot.upper_price,
+                bot.grid_levels,
+                bot.grid_type
+            )
+
+            new_order = None
+            profit = None
+            cycle_completed = False
+
+            if order.is_buy:
+                # BUY order filled → create SELL order above
+                next_level = order.level + 1
+
+                if next_level < len(price_levels):
+                    sell_price = round_down(price_levels[next_level], price_precision)
+                    sell_amount = order.amount
+
+                    # Create sell order
+                    mexc_order = await self.mexc.create_limit_order(
+                        user_id=bot.user_id,
+                        symbol=bot.symbol,
+                        side='sell',
+                        price=sell_price,
+                        amount=sell_amount
+                    )
+
+                    # Save to DB
+                    new_order = GridOrder(
+                        grid_bot_id=bot.id,
+                        exchange_order_id=mexc_order['order_id'],
+                        side='sell',
+                        order_type='limit',
+                        level=next_level,
+                        price=sell_price,
+                        amount=sell_amount,
+                        total=sell_price * sell_amount,
+                        status='open',
+                        paired_order_id=order.id
+                    )
+                    self.db.add(new_order)
+
+                    logger.info(
+                        f"Created sell order at level {next_level} "
+                        f"after buy filled: {sell_amount} @ {sell_price}"
+                    )
+
+            elif order.is_sell:
+                # SELL order filled → create BUY order below
+                prev_level = order.level - 1
+
+                if prev_level >= 0:
+                    buy_price = round_down(price_levels[prev_level], price_precision)
+                    buy_amount = order.amount
+
+                    # Create buy order
+                    mexc_order = await self.mexc.create_limit_order(
+                        user_id=bot.user_id,
+                        symbol=bot.symbol,
+                        side='buy',
+                        price=buy_price,
+                        amount=buy_amount
+                    )
+
+                    # Save to DB
+                    new_order = GridOrder(
+                        grid_bot_id=bot.id,
+                        exchange_order_id=mexc_order['order_id'],
+                        side='buy',
+                        order_type='limit',
+                        level=prev_level,
+                        price=buy_price,
+                        amount=buy_amount,
+                        total=buy_price * buy_amount,
+                        status='open'
+                    )
+                    self.db.add(new_order)
+
+                    logger.info(
+                        f"Created buy order at level {prev_level} "
+                        f"after sell filled: {buy_amount} @ {buy_price}"
+                    )
+
+                # Calculate profit if there's a paired buy order
+                if order.paired_order_id:
+                    result = await self.db.execute(
+                        select(GridOrder).where(GridOrder.id == order.paired_order_id)
+                    )
+                    paired_buy_order = result.scalar_one_or_none()
+
+                    if paired_buy_order:
+                        profit = self.calculate_profit(paired_buy_order, order)
+                        order.profit = profit
+
+                        # Update bot statistics
+                        bot.total_profit += profit
+                        bot.total_profit_percent = (bot.total_profit / bot.investment_amount) * 100
+                        bot.completed_cycles += 1
+                        cycle_completed = True
+
+                        logger.info(f"Cycle completed! Profit: {profit}")
+
+            # Update bot activity
+            bot.last_activity_at = datetime.utcnow()
+
+            # Commit changes
+            await self.db.commit()
+
+            return {
+                'new_order': {
+                    'id': new_order.id if new_order else None,
+                    'side': new_order.side if new_order else None,
+                    'price': new_order.price if new_order else None,
+                    'amount': new_order.amount if new_order else None,
+                } if new_order else None,
+                'profit': profit,
+                'cycle_completed': cycle_completed,
+                'filled_order': {
+                    'id': order.id,
+                    'side': order.side,
+                    'price': order.price,
+                    'amount': order.amount,
+                }
+            }
+
+        except Exception as e:
+            logger.error(f"Error handling filled order {order_id}: {e}")
+            await self.db.rollback()
+            raise GridStrategyError(f"Ошибка обработки ордера: {str(e)}")
+
+    @staticmethod
+    def calculate_profit(buy_order: GridOrder, sell_order: GridOrder) -> Decimal:
+        """
+        Calculate profit from a completed cycle.
+
+        profit = (sell_price * sell_amount) - (buy_price * buy_amount)
+                 - buy_fee - sell_fee
+
+        Args:
+            buy_order: Buy order
+            sell_order: Sell order
+
+        Returns:
+            Profit in quote currency (USDT)
+        """
+        buy_cost = buy_order.price * buy_order.amount + (buy_order.fee or Decimal('0'))
+        sell_revenue = sell_order.price * sell_order.amount - (sell_order.fee or Decimal('0'))
+
+        profit = sell_revenue - buy_cost
+
+        return profit
