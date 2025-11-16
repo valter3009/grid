@@ -669,17 +669,17 @@ class GridStrategy:
             await self.db.rollback()
             raise GridStrategyError(f"Ошибка создания ордеров: {str(e)}")
 
-    async def handle_filled_order(self, order_id: int) -> dict:
+    async def handle_filled_order_flat(self, order_id: int) -> dict:
         """
-        Handle filled order and create counter order.
+        Handle filled order for FLAT GRID bot and create counter order.
 
-        Algorithm:
+        Flat Grid Algorithm:
         1. Load order from DB
         2. Update status = 'filled', filled_at = NOW()
         3. IF order.side == 'buy':
-               Create SELL order at next level up
+               Create SELL order at: filled_price + flat_spread
         4. ELIF order.side == 'sell':
-               Create BUY order at next level down
+               Create BUY order at: filled_price - flat_spread
                Calculate profit from cycle
                Update bot statistics
         5. Send notification to user
@@ -715,6 +715,229 @@ class GridStrategy:
         if not bot:
             raise GridStrategyError(f"Grid bot {order.grid_bot_id} not found")
 
+        if bot.grid_type != 'flat':
+            raise GridStrategyError("This method is only for flat grid bots")
+
+        try:
+            # Update order status
+            order.status = 'filled'
+            order.filled_at = datetime.utcnow()
+
+            # Get exchange info
+            exchange_info = await self.mexc.get_exchange_info(bot.symbol)
+            amount_precision = exchange_info['amount_precision']
+            price_precision = exchange_info['price_precision']
+            min_order_amount = exchange_info['min_order_amount']
+
+            new_order = None
+            profit = None
+            cycle_completed = False
+
+            if order.is_buy:
+                # BUY order filled → create SELL order above at filled_price + flat_spread
+                sell_price = order.price + bot.flat_spread
+                sell_price = round_down(sell_price, price_precision)
+
+                # Calculate amount based on order_size / price
+                sell_amount = bot.order_size / sell_price
+                sell_amount = round_down(sell_amount, amount_precision)
+
+                # Ensure amount meets minimum requirement
+                if sell_amount < min_order_amount:
+                    sell_amount = min_order_amount
+
+                try:
+                    # Create sell order
+                    mexc_order = await self.mexc.create_limit_order(
+                        user_id=bot.user_id,
+                        symbol=bot.symbol,
+                        side='sell',
+                        price=sell_price,
+                        amount=sell_amount
+                    )
+
+                    # Save to DB
+                    new_order = GridOrder(
+                        grid_bot_id=bot.id,
+                        exchange_order_id=mexc_order['order_id'],
+                        side='sell',
+                        order_type='limit',
+                        level=order.level,  # Keep same level for flat grid
+                        price=sell_price,
+                        amount=sell_amount,
+                        total=sell_price * sell_amount,
+                        status='open',
+                        paired_order_id=order.id
+                    )
+                    self.db.add(new_order)
+
+                    logger.info(
+                        f"[Flat Grid] Created sell order after buy filled: "
+                        f"{sell_amount} @ ${sell_price} (spread: ${bot.flat_spread})"
+                    )
+
+                except Exception as e:
+                    logger.error(f"Failed to create sell order after buy filled: {e}")
+                    # Continue anyway - order is filled
+
+            elif order.is_sell:
+                # SELL order filled → create BUY order below at filled_price - flat_spread
+                buy_price = order.price - bot.flat_spread
+                buy_price = round_down(buy_price, price_precision)
+
+                # Ensure buy price is positive
+                if buy_price <= 0:
+                    logger.warning(
+                        f"Calculated buy price {buy_price} is <= 0, skipping buy order creation"
+                    )
+                else:
+                    # Calculate amount based on order_size / price
+                    buy_amount = bot.order_size / buy_price
+                    buy_amount = round_down(buy_amount, amount_precision)
+
+                    # Ensure amount meets minimum requirement
+                    if buy_amount < min_order_amount:
+                        buy_amount = min_order_amount
+
+                    try:
+                        # Create buy order
+                        mexc_order = await self.mexc.create_limit_order(
+                            user_id=bot.user_id,
+                            symbol=bot.symbol,
+                            side='buy',
+                            price=buy_price,
+                            amount=buy_amount
+                        )
+
+                        # Save to DB
+                        new_order = GridOrder(
+                            grid_bot_id=bot.id,
+                            exchange_order_id=mexc_order['order_id'],
+                            side='buy',
+                            order_type='limit',
+                            level=order.level,  # Keep same level for flat grid
+                            price=buy_price,
+                            amount=buy_amount,
+                            total=buy_price * buy_amount,
+                            status='open'
+                        )
+                        self.db.add(new_order)
+
+                        logger.info(
+                            f"[Flat Grid] Created buy order after sell filled: "
+                            f"{buy_amount} @ ${buy_price} (spread: ${bot.flat_spread})"
+                        )
+
+                    except Exception as e:
+                        logger.error(f"Failed to create buy order after sell filled: {e}")
+                        # Continue anyway - order is filled
+
+                # Calculate profit if there's a paired buy order
+                if order.paired_order_id:
+                    result = await self.db.execute(
+                        select(GridOrder).where(GridOrder.id == order.paired_order_id)
+                    )
+                    paired_buy_order = result.scalar_one_or_none()
+
+                    if paired_buy_order:
+                        profit = self.calculate_profit(paired_buy_order, order)
+                        order.profit = profit
+
+                        # Update bot statistics
+                        bot.total_profit += profit
+
+                        # For flat grid, calculate profit percent based on total capital
+                        total_capital = (bot.buy_orders_count + bot.sell_orders_count) * bot.order_size
+                        bot.total_profit_percent = (bot.total_profit / total_capital) * 100
+                        bot.completed_cycles += 1
+                        cycle_completed = True
+
+                        logger.info(f"[Flat Grid] Cycle completed! Profit: ${profit}")
+
+            # Update bot activity
+            bot.last_activity_at = datetime.utcnow()
+
+            # Commit changes
+            await self.db.commit()
+
+            return {
+                'new_order': {
+                    'id': new_order.id if new_order else None,
+                    'side': new_order.side if new_order else None,
+                    'price': new_order.price if new_order else None,
+                    'amount': new_order.amount if new_order else None,
+                } if new_order else None,
+                'profit': profit,
+                'cycle_completed': cycle_completed,
+                'filled_order': {
+                    'id': order.id,
+                    'side': order.side,
+                    'price': order.price,
+                    'amount': order.amount,
+                }
+            }
+
+        except Exception as e:
+            logger.error(f"Error handling flat grid filled order {order_id}: {e}")
+            await self.db.rollback()
+            raise GridStrategyError(f"Ошибка обработки ордера: {str(e)}")
+
+    async def handle_filled_order(self, order_id: int) -> dict:
+        """
+        Handle filled order and create counter order.
+
+        This method routes to the appropriate handler based on grid type:
+        - Flat grid → handle_filled_order_flat()
+        - Range grid → handles inline
+
+        Algorithm for Range Grid:
+        1. Load order from DB
+        2. Update status = 'filled', filled_at = NOW()
+        3. IF order.side == 'buy':
+               Create SELL order at next level up
+        4. ELIF order.side == 'sell':
+               Create BUY order at next level down
+               Calculate profit from cycle
+               Update bot statistics
+        5. Send notification to user
+
+        Args:
+            order_id: Order ID in database
+
+        Returns:
+            {
+                'new_order': {...},
+                'profit': Decimal (if sell),
+                'cycle_completed': bool
+            }
+
+        Raises:
+            GridStrategyError: If processing fails
+        """
+        # Load order from DB to check grid type
+        result = await self.db.execute(
+            select(GridOrder).where(GridOrder.id == order_id)
+        )
+        order = result.scalar_one_or_none()
+
+        if not order:
+            raise GridStrategyError(f"Order {order_id} not found")
+
+        # Load bot to check grid type
+        result = await self.db.execute(
+            select(GridBot).where(GridBot.id == order.grid_bot_id)
+        )
+        bot = result.scalar_one_or_none()
+
+        if not bot:
+            raise GridStrategyError(f"Grid bot {order.grid_bot_id} not found")
+
+        # Route to appropriate handler based on grid type
+        if bot.grid_type == 'flat':
+            logger.info(f"Routing to flat grid handler for order {order_id}")
+            return await self.handle_filled_order_flat(order_id)
+
+        # Range grid logic (original implementation)
         try:
             # Update order status
             order.status = 'filled'

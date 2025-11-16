@@ -5,8 +5,9 @@ import sys
 from contextlib import asynccontextmanager
 
 from aiogram import Bot, Dispatcher
-from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.storage.redis import RedisStorage
 from sqlalchemy.ext.asyncio import AsyncSession
+from redis.asyncio import Redis
 
 from src.core.config import settings
 from src.core.database import init_db, close_db, AsyncSessionLocal
@@ -46,6 +47,7 @@ class Application:
         """Initialize application."""
         self.bot = None
         self.dp = None
+        self.redis = None
         self.mexc_service = None
         self.grid_strategy = None
         self.bot_manager = None
@@ -61,9 +63,20 @@ class Application:
         await init_db()
         logger.info("Database initialized")
 
-        # Initialize Telegram bot
+        # Initialize Redis for FSM storage
+        self.redis = Redis(
+            host=settings.REDIS_HOST,
+            port=settings.REDIS_PORT,
+            db=0,
+            decode_responses=False
+        )
+        logger.info(f"Redis connected: {settings.REDIS_HOST}:{settings.REDIS_PORT}")
+
+        # Initialize Telegram bot with Redis storage for FSM
         self.bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
-        self.dp = Dispatcher(storage=MemoryStorage())
+        storage = RedisStorage(redis=self.redis)
+        self.dp = Dispatcher(storage=storage)
+        logger.info("FSM storage: RedisStorage (states persist across restarts)")
 
         # Register middleware for DB session injection
         @self.dp.message.middleware()
@@ -161,6 +174,11 @@ class Application:
         if self.mexc_service:
             await self.mexc_service.close_all()
             logger.info("MEXC connections closed")
+
+        # Close Redis connection
+        if self.redis:
+            await self.redis.close()
+            logger.info("Redis connection closed")
 
         # Close database
         await close_db()
