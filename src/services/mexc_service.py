@@ -308,6 +308,7 @@ class MEXCService:
         Raises:
             MEXCError: If order creation fails
         """
+        exchange = None
         try:
             exchange = await self._get_exchange(user_id)
 
@@ -320,6 +321,9 @@ class MEXCService:
                 max_retries=2,
                 exceptions=(ccxt.NetworkError,)
             )
+
+            if not order:
+                raise MEXCError("Exchange returned empty response")
 
             return {
                 'order_id': str(order['id']),
@@ -348,6 +352,10 @@ class MEXCService:
         except Exception as e:
             logger.error(f"Error creating limit order: {e}")
             raise MEXCError(f"Ошибка создания ордера: {str(e)}")
+
+        finally:
+            if exchange:
+                await exchange.close()
 
     async def create_market_order(
         self,

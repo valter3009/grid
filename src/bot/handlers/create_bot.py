@@ -397,6 +397,10 @@ async def process_grid_levels(callback: CallbackQuery, state: FSMContext, db: As
             await callback.answer("❌ Количество уровней должно быть от 2 до 100")
             return
 
+        if grid_levels % 2 != 0:
+            await callback.answer("❌ Количество уровней должно быть четным числом")
+            return
+
         await state.update_data(grid_levels=grid_levels)
 
         # Get user and balance
@@ -413,10 +417,11 @@ async def process_grid_levels(callback: CallbackQuery, state: FSMContext, db: As
 
         data = await state.get_data()
         text = (
-            f"✅ Уровней сетки: {grid_levels}\n\n"
-            f"Шаг 5/5: Укажите сумму инвестиции (USDT)\n\n"
+            f"✅ Уровней сетки: {grid_levels} ({grid_levels//2} buy + {grid_levels//2} sell)\n\n"
+            f"Шаг 5/5: Укажите сумму одного ордера (USDT)\n\n"
             f"💼 Доступно: ${usdt_balance:.2f} USDT\n\n"
-            f"Эта сумма будет распределена по всем уровням сетки."
+            f"Каждый ордер (buy и sell) будет на эту сумму.\n"
+            f"Всего потребуется: ~${grid_levels * 10:.0f} USDT для {grid_levels} ордеров по $10"
         )
 
         await callback.message.edit_text(
@@ -448,6 +453,10 @@ async def process_custom_grid_levels(message: Message, state: FSMContext, db: As
             await message.answer("❌ Максимальное количество уровней: 100")
             return
 
+        if grid_levels % 2 != 0:
+            await message.answer("❌ Количество уровней должно быть четным числом (чтобы разделить поровну между buy и sell)")
+            return
+
         await state.update_data(grid_levels=grid_levels)
 
         # Get balance
@@ -463,9 +472,11 @@ async def process_custom_grid_levels(message: Message, state: FSMContext, db: As
         await state.set_state(CreateBotStates.waiting_for_investment)
 
         text = (
-            f"✅ Уровней сетки: {grid_levels}\n\n"
-            f"Шаг 5/5: Укажите сумму инвестиции (USDT)\n\n"
-            f"💼 Доступно: ${usdt_balance:.2f} USDT"
+            f"✅ Уровней сетки: {grid_levels} ({grid_levels//2} buy + {grid_levels//2} sell)\n\n"
+            f"Шаг 5/5: Укажите сумму одного ордера (USDT)\n\n"
+            f"💼 Доступно: ${usdt_balance:.2f} USDT\n\n"
+            f"Каждый ордер будет на эту сумму.\n"
+            f"Всего потребуется: ~${grid_levels * 10:.0f} USDT для {grid_levels} ордеров по $10"
         )
 
         await message.answer(
