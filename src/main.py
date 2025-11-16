@@ -17,7 +17,7 @@ from src.services.order_monitor import OrderMonitor
 from src.services.notification import NotificationService
 from src.services.health_check import HealthCheck
 
-from src.bot.handlers import start
+from src.bot.handlers import start, api_setup, balance, manage_bots, create_bot
 
 # Configure logging
 logging.basicConfig(
@@ -80,6 +80,10 @@ class Application:
 
         # Register handlers
         self.dp.include_router(start.router)
+        self.dp.include_router(api_setup.router)
+        self.dp.include_router(balance.router)
+        self.dp.include_router(manage_bots.router)
+        self.dp.include_router(create_bot.router)
         logger.info("Handlers registered")
 
         # Restore active bots
