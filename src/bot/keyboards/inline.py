@@ -257,3 +257,91 @@ def get_back_button(callback_data: str = "main_menu") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="◀️ Назад", callback_data=callback_data)]
     ])
+
+
+def get_grid_config_keyboard(config: dict) -> InlineKeyboardMarkup:
+    """
+    Get grid configuration keyboard with parameter indicators.
+
+    Args:
+        config: Dictionary with bot configuration
+            - pair: Trading pair (e.g., "BTC/USDT")
+            - flat_spread: Spread between buy and sell orders
+            - flat_increment: Step between grid levels
+            - buy_orders_count: Number of buy orders
+            - sell_orders_count: Number of sell orders
+            - starting_price: Starting price (0 = current market)
+            - order_size: Size of each order in USDT
+
+    Returns:
+        InlineKeyboardMarkup with configuration buttons
+    """
+    # Helper to format parameter display
+    def format_param(key, label, value, format_fn=None):
+        if value is None:
+            return f"⚪ {label}"
+        formatted = format_fn(value) if format_fn else str(value)
+        return f"✅ {label}: {formatted}"
+
+    # Format each parameter
+    pair_text = format_param(
+        "pair", "Торговая пара", config.get("pair")
+    )
+    spread_text = format_param(
+        "flat_spread", "Спред", config.get("flat_spread"),
+        lambda x: f"${float(x):,.0f}"
+    )
+    increment_text = format_param(
+        "flat_increment", "Шаг сетки", config.get("flat_increment"),
+        lambda x: f"${float(x):,.0f}"
+    )
+    buy_orders_text = format_param(
+        "buy_orders_count", "Buy ордеров", config.get("buy_orders_count"),
+        lambda x: f"{int(x)} шт"
+    )
+    sell_orders_text = format_param(
+        "sell_orders_count", "Sell ордеров", config.get("sell_orders_count"),
+        lambda x: f"{int(x)} шт"
+    )
+    starting_price_text = format_param(
+        "starting_price", "Начальная цена", config.get("starting_price"),
+        lambda x: "Текущая рыночная" if float(x) == 0 else f"${float(x):,.2f}"
+    )
+    order_size_text = format_param(
+        "order_size", "Размер ордера", config.get("order_size"),
+        lambda x: f"${float(x):,.2f}"
+    )
+
+    # Check if all parameters are configured
+    all_configured = all([
+        config.get("pair"),
+        config.get("flat_spread") is not None,
+        config.get("flat_increment") is not None,
+        config.get("buy_orders_count") is not None,
+        config.get("sell_orders_count") is not None,
+        config.get("starting_price") is not None,
+        config.get("order_size") is not None,
+    ])
+
+    buttons = [
+        [InlineKeyboardButton(text=pair_text, callback_data="config:pair")],
+        [InlineKeyboardButton(text=spread_text, callback_data="config:spread")],
+        [InlineKeyboardButton(text=increment_text, callback_data="config:increment")],
+        [InlineKeyboardButton(text=buy_orders_text, callback_data="config:buy_orders")],
+        [InlineKeyboardButton(text=sell_orders_text, callback_data="config:sell_orders")],
+        [InlineKeyboardButton(text=starting_price_text, callback_data="config:starting_price")],
+        [InlineKeyboardButton(text=order_size_text, callback_data="config:order_size")],
+    ]
+
+    # Add create button only if all configured
+    if all_configured:
+        buttons.append([
+            InlineKeyboardButton(text="🚀 Создать бота", callback_data="config:create")
+        ])
+
+    # Add cancel button
+    buttons.append([
+        InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")
+    ])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)

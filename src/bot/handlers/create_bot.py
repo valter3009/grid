@@ -1,22 +1,20 @@
-"""Grid bot creation handler."""
+"""Grid bot creation handler with flat grid configuration."""
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, Message
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from decimal import Decimal
 import logging
 
 from src.models.user import User
 from src.services.mexc_service import MEXCService
 from src.services.grid_strategy import GridStrategy
 from src.services.bot_manager import BotManager
+from src.bot.states import CreateGridBot
 from src.bot.keyboards.inline import (
+    get_grid_config_keyboard,
     get_trading_pairs_keyboard,
-    get_price_suggestions_keyboard,
-    get_grid_levels_keyboard,
-    get_investment_keyboard,
-    get_confirmation_keyboard,
     get_back_button
 )
 
@@ -25,24 +23,72 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 
-class CreateBotStates(StatesGroup):
-    """States for bot creation flow."""
-    waiting_for_pair = State()
-    waiting_for_custom_pair = State()
-    waiting_for_lower_price = State()
-    waiting_for_custom_lower_price = State()
-    waiting_for_upper_price = State()
-    waiting_for_custom_upper_price = State()
-    waiting_for_grid_levels = State()
-    waiting_for_custom_grid_levels = State()
-    waiting_for_investment = State()
-    waiting_for_custom_investment = State()
-    confirmation = State()
+# Инструкции для каждого параметра
+INSTRUCTIONS = {
+    "pair": (
+        "📈 <b>Торговая пара</b>\n\n"
+        "Выберите криптовалютную пару для торговли.\n"
+        "Рекомендуются волатильные пары с хорошей ликвидностью.\n\n"
+        "Пример: BTC/USDT"
+    ),
+    "flat_spread": (
+        "💰 <b>Спред между Buy и Sell ордерами</b>\n\n"
+        "Это разница в цене между buy и sell ордерами на одном уровне.\n"
+        "Определяет вашу минимальную прибыль с одного цикла.\n\n"
+        "Пример: при спреде $2000:\n"
+        "• Buy ордер на $98,000\n"
+        "• Sell ордер на $100,000\n\n"
+        "Рекомендация: 1-3% от текущей цены\n\n"
+        "Введите спред в долларах (например: 2000):"
+    ),
+    "flat_increment": (
+        "📊 <b>Шаг между уровнями сетки</b>\n\n"
+        "Расстояние между соседними ордерами.\n"
+        "Чем меньше шаг, тем плотнее сетка.\n\n"
+        "Пример: при шаге $1000:\n"
+        "• Buy 1 на $98,000\n"
+        "• Buy 2 на $97,000\n"
+        "• Buy 3 на $96,000\n\n"
+        "Рекомендация: 0.5-2% от текущей цены\n\n"
+        "Введите шаг в долларах (например: 1000):"
+    ),
+    "buy_orders_count": (
+        "🟢 <b>Количество Buy ордеров</b>\n\n"
+        "Сколько ордеров на покупку разместить ниже начальной цены.\n"
+        "Больше ордеров = больше покрытие диапазона.\n\n"
+        "Рекомендация: 10-30 ордеров\n\n"
+        "Введите количество buy ордеров (например: 25):"
+    ),
+    "sell_orders_count": (
+        "🔴 <b>Количество Sell ордеров</b>\n\n"
+        "Сколько ордеров на продажу разместить выше начальной цены.\n"
+        "Обычно равно количеству buy ордеров.\n\n"
+        "Рекомендация: 10-30 ордеров\n\n"
+        "Введите количество sell ордеров (например: 25):"
+    ),
+    "starting_price": (
+        "🎯 <b>Начальная цена</b>\n\n"
+        "Центральная точка вашей сетки.\n"
+        "От неё будут размещаться buy ордера (ниже) и sell ордера (выше).\n\n"
+        "• Введите 0 для использования текущей рыночной цены\n"
+        "• Или введите конкретную цену\n\n"
+        "Рекомендация: используйте текущую рыночную (0)\n\n"
+        "Введите начальную цену (например: 0 или 95000):"
+    ),
+    "order_size": (
+        "💵 <b>Размер одного ордера</b>\n\n"
+        "Сумма в USDT для каждого ордера (buy и sell).\n"
+        "Все ордера будут одинакового размера.\n\n"
+        "Минимум: обычно $5-10 в зависимости от биржи\n"
+        "Рекомендация: $10-50 для начала\n\n"
+        "Введите размер ордера в USDT (например: 10):"
+    )
+}
 
 
 @router.callback_query(F.data == "create_grid_bot")
 async def start_bot_creation(callback: CallbackQuery, state: FSMContext, db: AsyncSession):
-    """Start grid bot creation flow."""
+    """Start grid bot creation with configuration menu."""
     try:
         # Get user
         result = await db.execute(
@@ -63,18 +109,35 @@ async def start_bot_creation(callback: CallbackQuery, state: FSMContext, db: Asy
             await callback.answer()
             return
 
-        # Start creation flow
-        await state.set_state(CreateBotStates.waiting_for_pair)
+        # Initialize empty configuration
+        await state.update_data(
+            pair=None,
+            flat_spread=None,
+            flat_increment=None,
+            buy_orders_count=None,
+            sell_orders_count=None,
+            starting_price=None,
+            order_size=None
+        )
+        await state.set_state(CreateGridBot.configuring)
 
+        # Show configuration menu with instructions
         text = (
-            "➕ Создание Grid бота\n\n"
-            "Шаг 1/5: Выберите торговую пару\n\n"
-            "Grid торговля работает лучше всего на волатильных парах с хорошей ликвидностью."
+            "➕ <b>Создание Grid бота</b>\n\n"
+            "Настройте параметры бота для торговли.\n"
+            "Нажимайте на кнопки ниже для настройки каждого параметра.\n\n"
+            "ℹ️ <b>Как работает Grid бот:</b>\n"
+            "• Размещает сетку buy и sell ордеров\n"
+            "• Покупает при падении, продаёт при росте\n"
+            "• Зарабатывает на колебаниях цены\n\n"
+            "⚠️ <b>Важно:</b> Настройте все параметры перед созданием!"
         )
 
+        data = await state.get_data()
         await callback.message.edit_text(
             text,
-            reply_markup=get_trading_pairs_keyboard()
+            reply_markup=get_grid_config_keyboard(data),
+            parse_mode="HTML"
         )
         await callback.answer()
 
@@ -83,7 +146,21 @@ async def start_bot_creation(callback: CallbackQuery, state: FSMContext, db: Asy
         await callback.answer("Ошибка при создании бота")
 
 
-@router.callback_query(F.data.startswith("pair:"), CreateBotStates.waiting_for_pair)
+# === НАСТРОЙКА ТОРГОВОЙ ПАРЫ ===
+
+@router.callback_query(F.data == "config:pair", CreateGridBot.configuring)
+async def config_pair(callback: CallbackQuery, state: FSMContext):
+    """Configure trading pair."""
+    await callback.message.edit_text(
+        INSTRUCTIONS["pair"],
+        reply_markup=get_trading_pairs_keyboard(),
+        parse_mode="HTML"
+    )
+    await state.set_state(CreateGridBot.waiting_for_pair)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("pair:"), CreateGridBot.waiting_for_pair)
 async def process_pair_selection(callback: CallbackQuery, state: FSMContext, db: AsyncSession):
     """Process trading pair selection."""
     try:
@@ -96,16 +173,13 @@ async def process_pair_selection(callback: CallbackQuery, state: FSMContext, db:
                 "Убедитесь, что пара существует на MEXC.",
                 reply_markup=get_back_button("cancel")
             )
-            await state.set_state(CreateBotStates.waiting_for_custom_pair)
+            await state.set_state(CreateGridBot.waiting_for_custom_pair)
             await callback.answer()
             return
 
-        # Validate pair and get current price
-        # Keep the slash format for CCXT API (BTC/USDT)
-        symbol = pair_value
-
+        # Validate pair with MEXC
         mexc_service = MEXCService(db)
-        current_price = await mexc_service.get_current_price(symbol)
+        current_price = await mexc_service.get_current_price(pair_value)
 
         if current_price is None:
             await callback.answer("❌ Не удалось получить цену для этой пары")
@@ -113,25 +187,25 @@ async def process_pair_selection(callback: CallbackQuery, state: FSMContext, db:
 
         # Save to state
         await state.update_data(
-            symbol=symbol,
-            display_symbol=pair_value,
-            current_price=current_price
+            pair=pair_value,
+            current_price=float(current_price)
         )
 
-        # Move to lower price selection
-        await state.set_state(CreateBotStates.waiting_for_lower_price)
+        # Return to config menu
+        await state.set_state(CreateGridBot.configuring)
+        data = await state.get_data()
 
         text = (
+            "➕ <b>Создание Grid бота</b>\n\n"
             f"✅ Пара: {pair_value}\n"
             f"💰 Текущая цена: ${current_price:,.2f}\n\n"
-            f"Шаг 2/5: Установите нижнюю границу диапазона\n\n"
-            f"Выберите минимальную цену для вашей Grid сетки.\n"
-            f"Рекомендуется установить на 3-10% ниже текущей цены."
+            "Продолжайте настройку параметров:"
         )
 
         await callback.message.edit_text(
             text,
-            reply_markup=get_price_suggestions_keyboard(current_price, is_lower=True)
+            reply_markup=get_grid_config_keyboard(data),
+            parse_mode="HTML"
         )
         await callback.answer()
 
@@ -140,25 +214,19 @@ async def process_pair_selection(callback: CallbackQuery, state: FSMContext, db:
         await callback.answer("Ошибка при выборе пары")
 
 
-@router.message(F.text, CreateBotStates.waiting_for_custom_pair)
+@router.message(F.text, CreateGridBot.waiting_for_custom_pair)
 async def process_custom_pair(message: Message, state: FSMContext, db: AsyncSession):
     """Process custom trading pair input."""
     try:
         pair = message.text.strip().upper()
 
-        # Basic validation
         if '/' not in pair:
-            await message.answer(
-                "❌ Неверный формат. Используйте формат: BTC/USDT"
-            )
+            await message.answer("❌ Неверный формат. Используйте формат: BTC/USDT")
             return
-
-        # Keep slash format for CCXT API
-        symbol = pair
 
         # Validate with MEXC
         mexc_service = MEXCService(db)
-        current_price = await mexc_service.get_current_price(symbol)
+        current_price = await mexc_service.get_current_price(pair)
 
         if current_price is None:
             await message.answer(
@@ -167,24 +235,25 @@ async def process_custom_pair(message: Message, state: FSMContext, db: AsyncSess
             )
             return
 
-        # Save and continue
+        # Save and return to config
         await state.update_data(
-            symbol=symbol,
-            display_symbol=pair,
-            current_price=current_price
+            pair=pair,
+            current_price=float(current_price)
         )
-        await state.set_state(CreateBotStates.waiting_for_lower_price)
+        await state.set_state(CreateGridBot.configuring)
 
+        data = await state.get_data()
         text = (
+            "➕ <b>Создание Grid бота</b>\n\n"
             f"✅ Пара: {pair}\n"
             f"💰 Текущая цена: ${current_price:,.2f}\n\n"
-            f"Шаг 2/5: Установите нижнюю границу диапазона\n\n"
-            f"Выберите минимальную цену для вашей Grid сетки."
+            "Продолжайте настройку параметров:"
         )
 
         await message.answer(
             text,
-            reply_markup=get_price_suggestions_keyboard(current_price, is_lower=True)
+            reply_markup=get_grid_config_keyboard(data),
+            parse_mode="HTML"
         )
 
     except Exception as e:
@@ -192,450 +261,348 @@ async def process_custom_pair(message: Message, state: FSMContext, db: AsyncSess
         await message.answer("Ошибка при проверке пары")
 
 
-@router.callback_query(F.data.startswith("price:"), CreateBotStates.waiting_for_lower_price)
-async def process_lower_price(callback: CallbackQuery, state: FSMContext, db: AsyncSession):
-    """Process lower price selection."""
+# === НАСТРОЙКА СПРЕДА ===
+
+@router.callback_query(F.data == "config:spread", CreateGridBot.configuring)
+async def config_spread(callback: CallbackQuery, state: FSMContext):
+    """Configure flat spread."""
+    data = await state.get_data()
+    current_price = data.get("current_price", 0)
+
+    text = INSTRUCTIONS["flat_spread"]
+    if current_price > 0:
+        recommended = current_price * 0.02  # 2% от текущей цены
+        text += f"\n💡 Для текущей цены рекомендуется: ${recommended:,.0f}"
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_back_button("cancel"),
+        parse_mode="HTML"
+    )
+    await state.set_state(CreateGridBot.waiting_for_spread)
+    await callback.answer()
+
+
+@router.message(F.text, CreateGridBot.waiting_for_spread)
+async def process_spread(message: Message, state: FSMContext):
+    """Process spread input."""
     try:
-        price_value = callback.data.split(":")[1]
+        spread = float(message.text.strip())
 
-        if price_value == "custom":
-            data = await state.get_data()
-            await callback.message.edit_text(
-                f"✏️ Введите нижнюю границу цены\n\n"
-                f"Текущая цена: ${data['current_price']:,.2f}\n"
-                f"Введите цену ниже текущей:",
-                reply_markup=get_back_button("cancel")
-            )
-            await state.set_state(CreateBotStates.waiting_for_custom_lower_price)
-            await callback.answer()
+        if spread <= 0:
+            await message.answer("❌ Спред должен быть положительным числом")
             return
 
-        lower_price = float(price_value)
-        data = await state.get_data()
-
-        if lower_price >= data['current_price']:
-            await callback.answer("❌ Нижняя граница должна быть ниже текущей цены")
-            return
-
-        await state.update_data(lower_price=lower_price)
-        await state.set_state(CreateBotStates.waiting_for_upper_price)
-
-        text = (
-            f"✅ Нижняя граница: ${lower_price:,.2f}\n\n"
-            f"Шаг 3/5: Установите верхнюю границу диапазона\n\n"
-            f"Выберите максимальную цену для вашей Grid сетки.\n"
-            f"Рекомендуется установить на 3-10% выше текущей цены."
-        )
-
-        await callback.message.edit_text(
-            text,
-            reply_markup=get_price_suggestions_keyboard(data['current_price'], is_lower=False)
-        )
-        await callback.answer()
-
-    except Exception as e:
-        logger.error(f"Error processing lower price: {e}", exc_info=True)
-        await callback.answer("Ошибка при установке цены")
-
-
-@router.message(F.text, CreateBotStates.waiting_for_custom_lower_price)
-async def process_custom_lower_price(message: Message, state: FSMContext, db: AsyncSession):
-    """Process custom lower price input."""
-    try:
-        try:
-            lower_price = float(message.text.strip())
-        except ValueError:
-            await message.answer("❌ Введите корректное число")
-            return
+        # Save and return to config
+        await state.update_data(flat_spread=spread)
+        await state.set_state(CreateGridBot.configuring)
 
         data = await state.get_data()
-
-        if lower_price <= 0:
-            await message.answer("❌ Цена должна быть положительным числом")
-            return
-
-        if lower_price >= data['current_price']:
-            await message.answer(
-                f"❌ Нижняя граница (${lower_price:.2f}) должна быть ниже текущей цены (${data['current_price']:,.2f})"
-            )
-            return
-
-        await state.update_data(lower_price=lower_price)
-        await state.set_state(CreateBotStates.waiting_for_upper_price)
-
         text = (
-            f"✅ Нижняя граница: ${lower_price:,.2f}\n\n"
-            f"Шаг 3/5: Установите верхнюю границу диапазона"
+            "➕ <b>Создание Grid бота</b>\n\n"
+            f"✅ Спред установлен: ${spread:,.0f}\n\n"
+            "Продолжайте настройку параметров:"
         )
 
         await message.answer(
             text,
-            reply_markup=get_price_suggestions_keyboard(data['current_price'], is_lower=False)
+            reply_markup=get_grid_config_keyboard(data),
+            parse_mode="HTML"
         )
 
+    except ValueError:
+        await message.answer("❌ Введите корректное число")
     except Exception as e:
-        logger.error(f"Error processing custom lower price: {e}", exc_info=True)
+        logger.error(f"Error processing spread: {e}", exc_info=True)
         await message.answer("Ошибка")
 
 
-@router.callback_query(F.data.startswith("price:"), CreateBotStates.waiting_for_upper_price)
-async def process_upper_price(callback: CallbackQuery, state: FSMContext, db: AsyncSession):
-    """Process upper price selection."""
+# === НАСТРОЙКА ШАГА СЕТКИ ===
+
+@router.callback_query(F.data == "config:increment", CreateGridBot.configuring)
+async def config_increment(callback: CallbackQuery, state: FSMContext):
+    """Configure flat increment."""
+    data = await state.get_data()
+    current_price = data.get("current_price", 0)
+
+    text = INSTRUCTIONS["flat_increment"]
+    if current_price > 0:
+        recommended = current_price * 0.01  # 1% от текущей цены
+        text += f"\n💡 Для текущей цены рекомендуется: ${recommended:,.0f}"
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_back_button("cancel"),
+        parse_mode="HTML"
+    )
+    await state.set_state(CreateGridBot.waiting_for_increment)
+    await callback.answer()
+
+
+@router.message(F.text, CreateGridBot.waiting_for_increment)
+async def process_increment(message: Message, state: FSMContext):
+    """Process increment input."""
     try:
-        price_value = callback.data.split(":")[1]
+        increment = float(message.text.strip())
 
-        if price_value == "custom":
-            data = await state.get_data()
-            await callback.message.edit_text(
-                f"✏️ Введите верхнюю границу цены\n\n"
-                f"Текущая цена: ${data['current_price']:,.2f}\n"
-                f"Введите цену выше текущей:",
-                reply_markup=get_back_button("cancel")
-            )
-            await state.set_state(CreateBotStates.waiting_for_custom_upper_price)
-            await callback.answer()
+        if increment <= 0:
+            await message.answer("❌ Шаг должен быть положительным числом")
             return
 
-        upper_price = float(price_value)
-        data = await state.get_data()
-
-        if upper_price <= data['current_price']:
-            await callback.answer("❌ Верхняя граница должна быть выше текущей цены")
-            return
-
-        if upper_price <= data['lower_price']:
-            await callback.answer("❌ Верхняя граница должна быть выше нижней")
-            return
-
-        await state.update_data(upper_price=upper_price)
-        await state.set_state(CreateBotStates.waiting_for_grid_levels)
-
-        text = (
-            f"✅ Диапазон: ${data['lower_price']:,.2f} - ${upper_price:,.2f}\n\n"
-            f"Шаг 4/5: Выберите количество уровней Grid сетки\n\n"
-            f"Больше уровней = больше ордеров = больше потенциальной прибыли, но меньше прибыли с каждого ордера.\n\n"
-            f"Рекомендуется: 10-20 уровней"
-        )
-
-        await callback.message.edit_text(
-            text,
-            reply_markup=get_grid_levels_keyboard()
-        )
-        await callback.answer()
-
-    except Exception as e:
-        logger.error(f"Error processing upper price: {e}", exc_info=True)
-        await callback.answer("Ошибка при установке цены")
-
-
-@router.message(F.text, CreateBotStates.waiting_for_custom_upper_price)
-async def process_custom_upper_price(message: Message, state: FSMContext, db: AsyncSession):
-    """Process custom upper price input."""
-    try:
-        try:
-            upper_price = float(message.text.strip())
-        except ValueError:
-            await message.answer("❌ Введите корректное число")
-            return
+        # Save and return to config
+        await state.update_data(flat_increment=increment)
+        await state.set_state(CreateGridBot.configuring)
 
         data = await state.get_data()
-
-        if upper_price <= 0:
-            await message.answer("❌ Цена должна быть положительным числом")
-            return
-
-        if upper_price <= data['current_price']:
-            await message.answer(
-                f"❌ Верхняя граница (${upper_price:.2f}) должна быть выше текущей цены (${data['current_price']:,.2f})"
-            )
-            return
-
-        if upper_price <= data['lower_price']:
-            await message.answer(
-                f"❌ Верхняя граница (${upper_price:.2f}) должна быть выше нижней (${data['lower_price']:,.2f})"
-            )
-            return
-
-        await state.update_data(upper_price=upper_price)
-        await state.set_state(CreateBotStates.waiting_for_grid_levels)
-
         text = (
-            f"✅ Диапазон: ${data['lower_price']:,.2f} - ${upper_price:,.2f}\n\n"
-            f"Шаг 4/5: Выберите количество уровней Grid сетки"
+            "➕ <b>Создание Grid бота</b>\n\n"
+            f"✅ Шаг сетки установлен: ${increment:,.0f}\n\n"
+            "Продолжайте настройку параметров:"
         )
 
         await message.answer(
             text,
-            reply_markup=get_grid_levels_keyboard()
+            reply_markup=get_grid_config_keyboard(data),
+            parse_mode="HTML"
         )
 
+    except ValueError:
+        await message.answer("❌ Введите корректное число")
     except Exception as e:
-        logger.error(f"Error processing custom upper price: {e}", exc_info=True)
+        logger.error(f"Error processing increment: {e}", exc_info=True)
         await message.answer("Ошибка")
 
 
-@router.callback_query(F.data.startswith("levels:"), CreateBotStates.waiting_for_grid_levels)
-async def process_grid_levels(callback: CallbackQuery, state: FSMContext, db: AsyncSession):
-    """Process grid levels selection."""
+# === НАСТРОЙКА КОЛИЧЕСТВА BUY ОРДЕРОВ ===
+
+@router.callback_query(F.data == "config:buy_orders", CreateGridBot.configuring)
+async def config_buy_orders(callback: CallbackQuery, state: FSMContext):
+    """Configure buy orders count."""
+    await callback.message.edit_text(
+        INSTRUCTIONS["buy_orders_count"],
+        reply_markup=get_back_button("cancel"),
+        parse_mode="HTML"
+    )
+    await state.set_state(CreateGridBot.waiting_for_buy_orders)
+    await callback.answer()
+
+
+@router.message(F.text, CreateGridBot.waiting_for_buy_orders)
+async def process_buy_orders(message: Message, state: FSMContext):
+    """Process buy orders count input."""
     try:
-        levels_value = callback.data.split(":")[1]
+        count = int(message.text.strip())
 
-        if levels_value == "custom":
-            await callback.message.edit_text(
-                "✏️ Введите количество уровней Grid сетки\n\n"
-                "Рекомендуется: 5-50 уровней\n"
-                "Введите число:",
-                reply_markup=get_back_button("cancel")
-            )
-            await state.set_state(CreateBotStates.waiting_for_custom_grid_levels)
-            await callback.answer()
+        if count < 1:
+            await message.answer("❌ Количество ордеров должно быть минимум 1")
             return
 
-        grid_levels = int(levels_value)
-
-        if grid_levels < 2 or grid_levels > 100:
-            await callback.answer("❌ Количество уровней должно быть от 2 до 100")
+        if count > 100:
+            await message.answer("❌ Максимальное количество ордеров: 100")
             return
 
-        if grid_levels % 2 != 0:
-            await callback.answer("❌ Количество уровней должно быть четным числом")
-            return
-
-        await state.update_data(grid_levels=grid_levels)
-
-        # Get user and balance
-        result = await db.execute(
-            select(User).where(User.telegram_id == callback.from_user.id)
-        )
-        user = result.scalar_one_or_none()
-
-        mexc_service = MEXCService(db)
-        balances = await mexc_service.get_balance(user.id)
-        usdt_balance = balances.get('USDT', 0)
-
-        await state.set_state(CreateBotStates.waiting_for_investment)
+        # Save and return to config
+        await state.update_data(buy_orders_count=count)
+        await state.set_state(CreateGridBot.configuring)
 
         data = await state.get_data()
         text = (
-            f"✅ Уровней сетки: {grid_levels} ({grid_levels//2} buy + {grid_levels//2} sell)\n\n"
-            f"Шаг 5/5: Укажите сумму одного ордера (USDT)\n\n"
-            f"💼 Доступно: ${usdt_balance:.2f} USDT\n\n"
-            f"Каждый ордер (buy и sell) будет на эту сумму.\n"
-            f"Всего потребуется: ~${grid_levels * 10:.0f} USDT для {grid_levels} ордеров по $10"
-        )
-
-        await callback.message.edit_text(
-            text,
-            reply_markup=get_investment_keyboard(usdt_balance)
-        )
-        await callback.answer()
-
-    except Exception as e:
-        logger.error(f"Error processing grid levels: {e}", exc_info=True)
-        await callback.answer("Ошибка при выборе уровней")
-
-
-@router.message(F.text, CreateBotStates.waiting_for_custom_grid_levels)
-async def process_custom_grid_levels(message: Message, state: FSMContext, db: AsyncSession):
-    """Process custom grid levels input."""
-    try:
-        try:
-            grid_levels = int(message.text.strip())
-        except ValueError:
-            await message.answer("❌ Введите целое число")
-            return
-
-        if grid_levels < 2:
-            await message.answer("❌ Минимальное количество уровней: 2")
-            return
-
-        if grid_levels > 100:
-            await message.answer("❌ Максимальное количество уровней: 100")
-            return
-
-        if grid_levels % 2 != 0:
-            await message.answer("❌ Количество уровней должно быть четным числом (чтобы разделить поровну между buy и sell)")
-            return
-
-        await state.update_data(grid_levels=grid_levels)
-
-        # Get balance
-        result = await db.execute(
-            select(User).where(User.telegram_id == message.from_user.id)
-        )
-        user = result.scalar_one_or_none()
-
-        mexc_service = MEXCService(db)
-        balances = await mexc_service.get_balance(user.id)
-        usdt_balance = balances.get('USDT', 0)
-
-        await state.set_state(CreateBotStates.waiting_for_investment)
-
-        text = (
-            f"✅ Уровней сетки: {grid_levels} ({grid_levels//2} buy + {grid_levels//2} sell)\n\n"
-            f"Шаг 5/5: Укажите сумму одного ордера (USDT)\n\n"
-            f"💼 Доступно: ${usdt_balance:.2f} USDT\n\n"
-            f"Каждый ордер будет на эту сумму.\n"
-            f"Всего потребуется: ~${grid_levels * 10:.0f} USDT для {grid_levels} ордеров по $10"
+            "➕ <b>Создание Grid бота</b>\n\n"
+            f"✅ Количество buy ордеров: {count}\n\n"
+            "Продолжайте настройку параметров:"
         )
 
         await message.answer(
             text,
-            reply_markup=get_investment_keyboard(usdt_balance)
+            reply_markup=get_grid_config_keyboard(data),
+            parse_mode="HTML"
         )
 
+    except ValueError:
+        await message.answer("❌ Введите целое число")
     except Exception as e:
-        logger.error(f"Error processing custom grid levels: {e}", exc_info=True)
+        logger.error(f"Error processing buy orders count: {e}", exc_info=True)
         await message.answer("Ошибка")
 
 
-@router.callback_query(F.data.startswith("investment:"), CreateBotStates.waiting_for_investment)
-async def process_investment(callback: CallbackQuery, state: FSMContext, db: AsyncSession):
-    """Process investment amount selection."""
+# === НАСТРОЙКА КОЛИЧЕСТВА SELL ОРДЕРОВ ===
+
+@router.callback_query(F.data == "config:sell_orders", CreateGridBot.configuring)
+async def config_sell_orders(callback: CallbackQuery, state: FSMContext):
+    """Configure sell orders count."""
+    await callback.message.edit_text(
+        INSTRUCTIONS["sell_orders_count"],
+        reply_markup=get_back_button("cancel"),
+        parse_mode="HTML"
+    )
+    await state.set_state(CreateGridBot.waiting_for_sell_orders)
+    await callback.answer()
+
+
+@router.message(F.text, CreateGridBot.waiting_for_sell_orders)
+async def process_sell_orders(message: Message, state: FSMContext):
+    """Process sell orders count input."""
     try:
-        investment_value = callback.data.split(":")[1]
+        count = int(message.text.strip())
 
-        if investment_value == "custom":
-            await callback.message.edit_text(
-                "✏️ Введите сумму инвестиции (USDT)\n\n"
-                "Введите сумму в USDT:",
-                reply_markup=get_back_button("cancel")
-            )
-            await state.set_state(CreateBotStates.waiting_for_custom_investment)
-            await callback.answer()
+        if count < 1:
+            await message.answer("❌ Количество ордеров должно быть минимум 1")
             return
 
-        investment = float(investment_value)
+        if count > 100:
+            await message.answer("❌ Максимальное количество ордеров: 100")
+            return
 
-        # Get user and symbol data
-        result = await db.execute(
-            select(User).where(User.telegram_id == callback.from_user.id)
-        )
-        user = result.scalar_one_or_none()
+        # Save and return to config
+        await state.update_data(sell_orders_count=count)
+        await state.set_state(CreateGridBot.configuring)
 
         data = await state.get_data()
-        symbol = data.get('symbol')
-
-        # Get exchange info to check minimum order cost
-        mexc_service = MEXCService(db)
-        exchange_info = await mexc_service.get_exchange_info(symbol)
-        min_order_cost = float(exchange_info['min_order_cost'])
-
-        # Set minimum to exchange minimum or $2 as fallback
-        min_investment = max(min_order_cost, 2.0)
-
-        balances = await mexc_service.get_balance(user.id)
-        usdt_balance = balances.get('USDT', 0)
-
-        if investment > usdt_balance:
-            await callback.answer(f"❌ Недостаточно средств. Доступно: ${usdt_balance:.2f}")
-            return
-
-        if investment < min_investment:
-            await callback.answer(f"❌ Минимальный размер ордера: ${min_investment:.2f}")
-            return
-
-        await state.update_data(investment_amount=investment)
-        await state.set_state(CreateBotStates.confirmation)
-
-        # Show confirmation
-        data = await state.get_data()
-        grid_levels = data['grid_levels']
-        total_investment = investment * grid_levels
         text = (
-            "📋 Подтверждение создания бота\n\n"
-            f"📈 Пара: {data['display_symbol']}\n"
-            f"💰 Текущая цена: ${data['current_price']:,.2f}\n"
-            f"📊 Диапазон: ${data['lower_price']:,.2f} - ${data['upper_price']:,.2f}\n"
-            f"🔢 Уровней: {grid_levels} ({grid_levels//2} buy + {grid_levels//2} sell)\n"
-            f"💵 Размер ордера: ${investment:.2f} USDT\n"
-            f"💰 Всего потребуется: ~${total_investment:.2f} USDT\n\n"
-            f"⚠️ Убедитесь, что все параметры верны перед запуском."
-        )
-
-        await callback.message.edit_text(
-            text,
-            reply_markup=get_confirmation_keyboard(data)
-        )
-        await callback.answer()
-
-    except Exception as e:
-        logger.error(f"Error processing investment: {e}", exc_info=True)
-        await callback.answer("Ошибка при установке суммы")
-
-
-@router.message(F.text, CreateBotStates.waiting_for_custom_investment)
-async def process_custom_investment(message: Message, state: FSMContext, db: AsyncSession):
-    """Process custom investment amount input."""
-    try:
-        try:
-            investment = float(message.text.strip())
-        except ValueError:
-            await message.answer("❌ Введите корректное число")
-            return
-
-        # Get user and symbol data
-        result = await db.execute(
-            select(User).where(User.telegram_id == message.from_user.id)
-        )
-        user = result.scalar_one_or_none()
-
-        data = await state.get_data()
-        symbol = data.get('symbol')
-
-        # Get exchange info to check minimum order cost
-        mexc_service = MEXCService(db)
-        exchange_info = await mexc_service.get_exchange_info(symbol)
-        min_order_cost = float(exchange_info['min_order_cost'])
-
-        # Set minimum to exchange minimum or $2 as fallback
-        min_investment = max(min_order_cost, 2.0)
-
-        if investment < min_investment:
-            await message.answer(f"❌ Минимальный размер ордера: ${min_investment:.2f}")
-            return
-
-        balances = await mexc_service.get_balance(user.id)
-        usdt_balance = balances.get('USDT', 0)
-
-        if investment > usdt_balance:
-            await message.answer(
-                f"❌ Недостаточно средств\n"
-                f"Доступно: ${usdt_balance:.2f} USDT"
-            )
-            return
-
-        await state.update_data(investment_amount=investment)
-        await state.set_state(CreateBotStates.confirmation)
-
-        # Show confirmation
-        data = await state.get_data()
-        grid_levels = data['grid_levels']
-        total_investment = investment * grid_levels
-        text = (
-            "📋 Подтверждение создания бота\n\n"
-            f"📈 Пара: {data['display_symbol']}\n"
-            f"💰 Текущая цена: ${data['current_price']:,.2f}\n"
-            f"📊 Диапазон: ${data['lower_price']:,.2f} - ${data['upper_price']:,.2f}\n"
-            f"🔢 Уровней: {grid_levels} ({grid_levels//2} buy + {grid_levels//2} sell)\n"
-            f"💵 Размер ордера: ${investment:.2f} USDT\n"
-            f"💰 Всего потребуется: ~${total_investment:.2f} USDT\n\n"
-            f"⚠️ Убедитесь, что все параметры верны перед запуском."
+            "➕ <b>Создание Grid бота</b>\n\n"
+            f"✅ Количество sell ордеров: {count}\n\n"
+            "Продолжайте настройку параметров:"
         )
 
         await message.answer(
             text,
-            reply_markup=get_confirmation_keyboard(data)
+            reply_markup=get_grid_config_keyboard(data),
+            parse_mode="HTML"
         )
 
+    except ValueError:
+        await message.answer("❌ Введите целое число")
     except Exception as e:
-        logger.error(f"Error processing custom investment: {e}", exc_info=True)
+        logger.error(f"Error processing sell orders count: {e}", exc_info=True)
         await message.answer("Ошибка")
 
 
-@router.callback_query(F.data == "confirm:start", CreateBotStates.confirmation)
-async def confirm_and_start_bot(callback: CallbackQuery, state: FSMContext, db: AsyncSession):
-    """Confirm and start the grid bot."""
+# === НАСТРОЙКА НАЧАЛЬНОЙ ЦЕНЫ ===
+
+@router.callback_query(F.data == "config:starting_price", CreateGridBot.configuring)
+async def config_starting_price(callback: CallbackQuery, state: FSMContext):
+    """Configure starting price."""
+    data = await state.get_data()
+    current_price = data.get("current_price", 0)
+
+    text = INSTRUCTIONS["starting_price"]
+    if current_price > 0:
+        text += f"\n💡 Текущая рыночная цена: ${current_price:,.2f}"
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_back_button("cancel"),
+        parse_mode="HTML"
+    )
+    await state.set_state(CreateGridBot.waiting_for_starting_price)
+    await callback.answer()
+
+
+@router.message(F.text, CreateGridBot.waiting_for_starting_price)
+async def process_starting_price(message: Message, state: FSMContext):
+    """Process starting price input."""
+    try:
+        price = float(message.text.strip())
+
+        if price < 0:
+            await message.answer("❌ Цена не может быть отрицательной")
+            return
+
+        # Save and return to config
+        await state.update_data(starting_price=price)
+        await state.set_state(CreateGridBot.configuring)
+
+        data = await state.get_data()
+        price_text = "Текущая рыночная" if price == 0 else f"${price:,.2f}"
+        text = (
+            "➕ <b>Создание Grid бота</b>\n\n"
+            f"✅ Начальная цена: {price_text}\n\n"
+            "Продолжайте настройку параметров:"
+        )
+
+        await message.answer(
+            text,
+            reply_markup=get_grid_config_keyboard(data),
+            parse_mode="HTML"
+        )
+
+    except ValueError:
+        await message.answer("❌ Введите корректное число")
+    except Exception as e:
+        logger.error(f"Error processing starting price: {e}", exc_info=True)
+        await message.answer("Ошибка")
+
+
+# === НАСТРОЙКА РАЗМЕРА ОРДЕРА ===
+
+@router.callback_query(F.data == "config:order_size", CreateGridBot.configuring)
+async def config_order_size(callback: CallbackQuery, state: FSMContext, db: AsyncSession):
+    """Configure order size."""
+    # Get user balance
+    result = await db.execute(
+        select(User).where(User.telegram_id == callback.from_user.id)
+    )
+    user = result.scalar_one_or_none()
+
+    mexc_service = MEXCService(db)
+    balances = await mexc_service.get_balance(user.id)
+    usdt_balance = balances.get('USDT', 0)
+
+    text = INSTRUCTIONS["order_size"]
+    text += f"\n💼 Доступно на балансе: ${usdt_balance:,.2f} USDT"
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_back_button("cancel"),
+        parse_mode="HTML"
+    )
+    await state.set_state(CreateGridBot.waiting_for_order_size)
+    await callback.answer()
+
+
+@router.message(F.text, CreateGridBot.waiting_for_order_size)
+async def process_order_size(message: Message, state: FSMContext):
+    """Process order size input."""
+    try:
+        size = float(message.text.strip())
+
+        if size <= 0:
+            await message.answer("❌ Размер ордера должен быть положительным числом")
+            return
+
+        if size < 5:
+            await message.answer("❌ Минимальный размер ордера: $5")
+            return
+
+        # Save and return to config
+        await state.update_data(order_size=size)
+        await state.set_state(CreateGridBot.configuring)
+
+        data = await state.get_data()
+        text = (
+            "➕ <b>Создание Grid бота</b>\n\n"
+            f"✅ Размер ордера: ${size:,.2f}\n\n"
+            "Продолжайте настройку параметров:"
+        )
+
+        await message.answer(
+            text,
+            reply_markup=get_grid_config_keyboard(data),
+            parse_mode="HTML"
+        )
+
+    except ValueError:
+        await message.answer("❌ Введите корректное число")
+    except Exception as e:
+        logger.error(f"Error processing order size: {e}", exc_info=True)
+        await message.answer("Ошибка")
+
+
+# === СОЗДАНИЕ БОТА ===
+
+@router.callback_query(F.data == "config:create", CreateGridBot.configuring)
+async def create_bot(callback: CallbackQuery, state: FSMContext, db: AsyncSession):
+    """Create the bot after all parameters are configured."""
     try:
         data = await state.get_data()
 
@@ -650,14 +617,136 @@ async def confirm_and_start_bot(callback: CallbackQuery, state: FSMContext, db: 
             await state.clear()
             return
 
-        # Answer callback immediately to avoid timeout
+        # Calculate required balance
+        buy_count = data["buy_orders_count"]
+        sell_count = data["sell_orders_count"]
+        order_size = data["order_size"]
+
+        # For flat grid:
+        # - Need USDT for buy orders: buy_count * order_size
+        # - Need to buy base currency for sell orders: sell_count * order_size
+        total_required = (buy_count + sell_count) * order_size
+
+        # Check balance
+        mexc_service = MEXCService(db)
+        balances = await mexc_service.get_balance(user.id)
+        usdt_balance = balances.get('USDT', 0)
+
+        # Show confirmation with balance check
+        pair = data["pair"]
+        spread = data["flat_spread"]
+        increment = data["flat_increment"]
+        starting_price = data["starting_price"]
+        current_price = data.get("current_price", 0)
+
+        # Calculate price range
+        if starting_price == 0:
+            starting_price = current_price
+
+        lowest_buy = starting_price - (increment * buy_count)
+        highest_sell = starting_price + (increment * sell_count)
+
+        text = (
+            "📋 <b>Подтверждение создания бота</b>\n\n"
+            f"📈 Пара: {pair}\n"
+            f"💰 Текущая цена: ${current_price:,.2f}\n"
+            f"🎯 Начальная цена: ${starting_price:,.2f}\n\n"
+            f"📊 Параметры сетки:\n"
+            f"• Спред: ${spread:,.0f}\n"
+            f"• Шаг сетки: ${increment:,.0f}\n"
+            f"• Buy ордеров: {buy_count} шт\n"
+            f"• Sell ордеров: {sell_count} шт\n"
+            f"• Размер ордера: ${order_size:,.2f}\n\n"
+            f"📉 Диапазон цен:\n"
+            f"• Самый низкий buy: ${lowest_buy:,.2f}\n"
+            f"• Самый высокий sell: ${highest_sell:,.2f}\n\n"
+            f"💵 <b>Требуется средств:</b>\n"
+            f"• Buy ордера: {buy_count} × ${order_size:,.2f} = ${buy_count * order_size:,.2f}\n"
+            f"• Sell ордера: {sell_count} × ${order_size:,.2f} = ${sell_count * order_size:,.2f}\n"
+            f"• <b>Всего: ${total_required:,.2f} USDT</b>\n\n"
+            f"💼 Доступно: ${usdt_balance:,.2f} USDT\n"
+        )
+
+        if usdt_balance < total_required:
+            text += (
+                f"\n❌ <b>Недостаточно средств!</b>\n"
+                f"Не хватает: ${total_required - usdt_balance:,.2f} USDT\n\n"
+                f"Пополните баланс или уменьшите параметры бота."
+            )
+            await callback.message.edit_text(
+                text,
+                reply_markup=get_back_button("main_menu"),
+                parse_mode="HTML"
+            )
+            await callback.answer()
+            return
+
+        text += "\n✅ Средств достаточно! Можно создавать бота."
+
+        # Create inline keyboard with confirmation
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🚀 Подтвердить и создать", callback_data="confirm:create_flat")],
+            [InlineKeyboardButton(text="◀️ Назад к настройкам", callback_data="confirm:back")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")]
+        ])
+
+        await callback.message.edit_text(
+            text,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+        await state.set_state(CreateGridBot.confirmation)
+        await callback.answer()
+
+    except Exception as e:
+        logger.error(f"Error in create_bot: {e}", exc_info=True)
+        await callback.answer("Ошибка при проверке параметров")
+
+
+@router.callback_query(F.data == "confirm:back", CreateGridBot.confirmation)
+async def back_to_config(callback: CallbackQuery, state: FSMContext):
+    """Return to configuration menu."""
+    await state.set_state(CreateGridBot.configuring)
+    data = await state.get_data()
+
+    text = (
+        "➕ <b>Создание Grid бота</b>\n\n"
+        "Продолжайте настройку параметров:"
+    )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_grid_config_keyboard(data),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "confirm:create_flat", CreateGridBot.confirmation)
+async def confirm_create_flat(callback: CallbackQuery, state: FSMContext, db: AsyncSession):
+    """Confirm and create flat grid bot."""
+    try:
+        data = await state.get_data()
+
+        # Get user
+        result = await db.execute(
+            select(User).where(User.telegram_id == callback.from_user.id)
+        )
+        user = result.scalar_one_or_none()
+
+        if not user:
+            await callback.answer("Пользователь не найден")
+            await state.clear()
+            return
+
         await callback.answer()
 
         # Show progress
         await callback.message.edit_text(
             "⏳ Создаю бота и размещаю ордера...\n"
-            "Это может занять несколько секунд.",
-            reply_markup=None
+            "Это может занять некоторое время.",
+            parse_mode="HTML"
         )
 
         # Initialize services
@@ -665,67 +754,88 @@ async def confirm_and_start_bot(callback: CallbackQuery, state: FSMContext, db: 
         grid_strategy = GridStrategy(db, mexc_service)
         bot_manager = BotManager(db, mexc_service, grid_strategy)
 
-        # Create bot
-        grid_bot = await bot_manager.create_bot(
+        # Get current price if starting_price is 0
+        starting_price = data["starting_price"]
+        if starting_price == 0:
+            current_price = await mexc_service.get_current_price(data["pair"])
+            starting_price = float(current_price)
+
+        # Create flat grid bot
+        grid_bot = await bot_manager.create_flat_bot(
             user_id=user.id,
-            symbol=data['symbol'],
-            lower_price=data['lower_price'],
-            upper_price=data['upper_price'],
-            grid_levels=data['grid_levels'],
-            investment_amount=data['investment_amount']
+            symbol=data["pair"],
+            flat_spread=Decimal(str(data["flat_spread"])),
+            flat_increment=Decimal(str(data["flat_increment"])),
+            buy_orders_count=data["buy_orders_count"],
+            sell_orders_count=data["sell_orders_count"],
+            starting_price=Decimal(str(starting_price)),
+            order_size=Decimal(str(data["order_size"]))
         )
 
         if grid_bot:
-            grid_levels = data['grid_levels']
-            order_size = data['investment_amount']
-            total_investment = order_size * grid_levels
+            buy_count = data["buy_orders_count"]
+            sell_count = data["sell_orders_count"]
+            order_size = data["order_size"]
+            total_invested = (buy_count + sell_count) * order_size
+
             await callback.message.edit_text(
-                "✅ Grid бот успешно создан и запущен!\n\n"
+                "✅ <b>Grid бот успешно создан и запущен!</b>\n\n"
                 f"🤖 Бот #{grid_bot.id}\n"
-                f"📈 {data['display_symbol']}\n"
-                f"💵 Размер ордера: ${order_size:.2f}\n"
-                f"🔢 Уровней сетки: {grid_levels} ({grid_levels//2} buy + {grid_levels//2} sell)\n"
-                f"💰 Всего задействовано: ~${total_investment:.2f}\n\n"
-                f"📊 Режим: Neutral Grid\n"
-                f"• {grid_levels//2} buy ордеров по ${order_size:.2f}\n"
-                f"• {grid_levels//2} sell ордеров по ${order_size:.2f}\n\n"
-                f"💡 Бот начнет зарабатывать когда цена будет двигаться в диапазоне сетки.\n\n"
+                f"📈 {data['pair']}\n"
+                f"💵 Размер ордера: ${order_size:,.2f}\n"
+                f"🔢 Ордеров: {buy_count} buy + {sell_count} sell\n"
+                f"💰 Всего задействовано: ${total_invested:,.2f}\n\n"
+                f"📊 Режим: Flat Grid\n"
+                f"• Спред: ${data['flat_spread']:,.0f}\n"
+                f"• Шаг: ${data['flat_increment']:,.0f}\n\n"
+                f"💡 Бот начнет зарабатывать на колебаниях цены.\n\n"
                 f"Просмотреть статус: 📊 Мои боты",
-                reply_markup=get_back_button("main_menu")
+                reply_markup=get_back_button("main_menu"),
+                parse_mode="HTML"
             )
-            logger.info(f"User {user.telegram_id} created bot {grid_bot.id}")
+            logger.info(f"User {user.telegram_id} created flat grid bot {grid_bot.id}")
         else:
             await callback.message.edit_text(
-                "❌ Ошибка при создании бота\n\n"
+                "❌ <b>Ошибка при создании бота</b>\n\n"
                 "Возможные причины:\n"
                 "• Недостаточно средств\n"
                 "• Проблемы с API ключами\n"
                 "• Технические проблемы MEXC\n\n"
                 "Попробуйте позже или обратитесь в поддержку.",
-                reply_markup=get_back_button("main_menu")
+                reply_markup=get_back_button("main_menu"),
+                parse_mode="HTML"
             )
 
         await state.clear()
 
     except Exception as e:
-        logger.error(f"Error creating bot: {e}", exc_info=True)
+        logger.error(f"Error creating flat grid bot: {e}", exc_info=True)
         try:
             await callback.message.edit_text(
-                "❌ Произошла ошибка при создании бота\n\n"
+                "❌ <b>Произошла ошибка при создании бота</b>\n\n"
+                f"Ошибка: {str(e)}\n\n"
                 "Попробуйте позже.",
-                reply_markup=get_back_button("main_menu")
+                reply_markup=get_back_button("main_menu"),
+                parse_mode="HTML"
             )
         except Exception:
-            # If edit fails, send new message
             await callback.message.answer(
-                "❌ Произошла ошибка при создании бота\n\n"
+                "❌ <b>Произошла ошибка при создании бота</b>\n\n"
                 "Попробуйте позже.",
-                reply_markup=get_back_button("main_menu")
+                reply_markup=get_back_button("main_menu"),
+                parse_mode="HTML"
             )
         await state.clear()
 
 
-@router.callback_query(F.data == "confirm:edit", CreateBotStates.confirmation)
-async def edit_bot_config(callback: CallbackQuery, state: FSMContext):
-    """Allow user to edit bot configuration."""
-    await callback.answer("Функция редактирования будет добавлена позже. Пока отмените и создайте заново.")
+# === ОТМЕНА ===
+
+@router.callback_query(F.data == "cancel")
+async def cancel_creation(callback: CallbackQuery, state: FSMContext):
+    """Cancel bot creation."""
+    await state.clear()
+    await callback.message.edit_text(
+        "❌ Создание бота отменено.",
+        reply_markup=get_back_button("main_menu")
+    )
+    await callback.answer()

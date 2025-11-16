@@ -106,6 +106,99 @@ class BotManager:
             await self.db.rollback()
             return None
 
+    async def create_flat_bot(
+        self,
+        user_id: int,
+        symbol: str,
+        flat_spread: Decimal,
+        flat_increment: Decimal,
+        buy_orders_count: int,
+        sell_orders_count: int,
+        starting_price: Decimal,
+        order_size: Decimal
+    ) -> Optional[GridBot]:
+        """
+        Create and start new flat grid bot.
+
+        Args:
+            user_id: User ID
+            symbol: Trading pair symbol (e.g., BTC/USDT)
+            flat_spread: Spread between buy and sell orders
+            flat_increment: Step between grid levels
+            buy_orders_count: Number of buy orders
+            sell_orders_count: Number of sell orders
+            starting_price: Starting price (center of grid)
+            order_size: Size of each order in USDT
+
+        Returns:
+            GridBot instance if created successfully, None otherwise
+        """
+        try:
+            logger.info(
+                f"Creating flat grid bot for user {user_id}: {symbol}, "
+                f"spread=${flat_spread}, increment=${flat_increment}, "
+                f"buy={buy_orders_count}, sell={sell_orders_count}, "
+                f"order_size=${order_size}"
+            )
+
+            # Create bot record
+            grid_bot = GridBot(
+                user_id=user_id,
+                symbol=symbol,
+                flat_spread=flat_spread,
+                flat_increment=flat_increment,
+                buy_orders_count=buy_orders_count,
+                sell_orders_count=sell_orders_count,
+                starting_price=starting_price,
+                order_size=order_size,
+                grid_type='flat',
+                status='active',
+                started_at=datetime.utcnow()
+            )
+            self.db.add(grid_bot)
+            await self.db.commit()
+            await self.db.refresh(grid_bot)
+
+            logger.info(f"Created flat grid bot #{grid_bot.id}, creating initial orders...")
+
+            # Create initial flat grid orders
+            orders_created = await self.grid_strategy.create_flat_grid_orders(
+                grid_bot.id,
+                starting_price
+            )
+
+            if not orders_created:
+                logger.error(f"Failed to create initial orders for bot #{grid_bot.id}")
+                grid_bot.status = 'stopped'
+                await self.db.commit()
+                return None
+
+            logger.info(
+                f"Flat grid bot #{grid_bot.id} created successfully with "
+                f"{orders_created['total_orders']} orders"
+            )
+
+            # Log bot creation
+            log = BotLog.create_info(
+                message=(
+                    f'Flat grid bot created: {symbol}, '
+                    f'spread=${flat_spread}, increment=${flat_increment}, '
+                    f'buy={buy_orders_count}, sell={sell_orders_count}, '
+                    f'order_size=${order_size}'
+                ),
+                grid_bot_id=grid_bot.id,
+                user_id=user_id
+            )
+            self.db.add(log)
+            await self.db.commit()
+
+            return grid_bot
+
+        except Exception as e:
+            logger.error(f"Error creating flat grid bot: {e}", exc_info=True)
+            await self.db.rollback()
+            return None
+
     async def start_bot(self, grid_bot_id: int) -> bool:
         """
         Start grid bot.
