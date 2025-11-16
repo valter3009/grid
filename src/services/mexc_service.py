@@ -30,6 +30,7 @@ class MEXCService:
     async def _get_exchange(self, user_id: int) -> ccxt.mexc:
         """
         Get or create MEXC exchange instance for user.
+        Note: Caller must close the exchange after use with await exchange.close()
 
         Args:
             user_id: User ID
@@ -40,10 +41,6 @@ class MEXCService:
         Raises:
             MEXCError: If user has no API keys configured
         """
-        # Check cache
-        if user_id in self._exchanges:
-            return self._exchanges[user_id]
-
         # Load user from database
         result = await self.db.execute(
             select(User).where(User.id == user_id)
@@ -68,9 +65,6 @@ class MEXCService:
                 'defaultType': 'spot',  # Only spot trading
             }
         })
-
-        # Cache exchange
-        self._exchanges[user_id] = exchange
 
         return exchange
 
@@ -138,6 +132,7 @@ class MEXCService:
             }
 
         finally:
+            # Always close the exchange connection
             if exchange:
                 await exchange.close()
 
@@ -154,6 +149,7 @@ class MEXCService:
         Raises:
             MEXCError: If API call fails
         """
+        exchange = None
         try:
             exchange = await self._get_exchange(user_id)
 
@@ -179,6 +175,10 @@ class MEXCService:
             logger.error(f"Error getting balance: {e}")
             raise MEXCError(f"Ошибка получения баланса: {str(e)}")
 
+        finally:
+            if exchange:
+                await exchange.close()
+
     async def get_current_price(self, symbol: str) -> Decimal:
         """
         Get current price for trading pair.
@@ -192,6 +192,7 @@ class MEXCService:
         Raises:
             MEXCError: If API call fails
         """
+        exchange = None
         try:
             # Use public API (no auth needed)
             exchange = ccxt.mexc({'enableRateLimit': True})
@@ -202,8 +203,6 @@ class MEXCService:
                 max_retries=3,
                 exceptions=(ccxt.NetworkError,)
             )
-
-            await exchange.close()
 
             price = ticker.get('last') or ticker.get('close')
             if not price:
@@ -218,6 +217,10 @@ class MEXCService:
         except Exception as e:
             logger.error(f"Error getting price for {symbol}: {e}")
             raise MEXCError(f"Ошибка получения цены: {str(e)}")
+
+        finally:
+            if exchange:
+                await exchange.close()
 
     async def get_exchange_info(self, symbol: str) -> dict:
         """
