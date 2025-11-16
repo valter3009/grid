@@ -124,17 +124,40 @@ async def show_bot_details(callback: CallbackQuery, db: AsyncSession):
         else:
             runtime_text = "—"
 
+        # Format parameters based on grid type
+        if bot.grid_type == 'flat':
+            # Flat grid parameters
+            total_capital = (bot.buy_orders_count + bot.sell_orders_count) * bot.order_size
+            params_text = (
+                f"💰 Параметры (Flat Grid):\n"
+                f"• Размер ордера: ${float(bot.order_size):.2f}\n"
+                f"• Спред: ${float(bot.flat_spread):.2f}\n"
+                f"• Шаг сетки: ${float(bot.flat_increment):.2f}\n"
+                f"• Buy ордеров: {bot.buy_orders_count}\n"
+                f"• Sell ордеров: {bot.sell_orders_count}\n"
+                f"• Начальная цена: {'Рыночная' if bot.starting_price == 0 else f'${float(bot.starting_price):.2f}'}\n"
+                f"• Всего капитала: ${float(total_capital):.2f}\n"
+            )
+        else:
+            # Range grid parameters
+            params_text = (
+                f"💰 Параметры (Range Grid):\n"
+                f"• Инвестиция: ${float(bot.investment_amount):.2f}\n"
+                f"• Диапазон: ${float(bot.lower_price):.2f} - ${float(bot.upper_price):.2f}\n"
+                f"• Уровней сетки: {bot.grid_levels}\n"
+            )
+
         text = (
             f"🤖 Бот #{bot.id}\n\n"
             f"📈 Пара: {bot.symbol}\n"
             f"{status_emoji} Статус: {status_text}\n\n"
-            f"💰 Параметры:\n"
-            f"• Инвестиция: ${bot.investment_amount:.2f}\n"
-            f"• Диапазон: ${bot.lower_price:.2f} - ${bot.upper_price:.2f}\n"
-            f"• Уровней сетки: {bot.grid_levels}\n\n"
+            f"{params_text}\n"
             f"📊 Статистика:\n"
             f"• Общая прибыль: ${total_profit:.2f}\n"
+            f"• ROI: {float(bot.total_profit_percent or 0):.2f}%\n"
             f"• Завершено циклов: {total_trades}\n"
+            f"• Активных Buy: {bot.total_buy_orders or 0}\n"
+            f"• Активных Sell: {bot.total_sell_orders or 0}\n"
             f"• Время работы: {runtime_text}\n\n"
             f"📅 Создан: {bot.created_at.strftime('%d.%m.%Y %H:%M')}"
         )
