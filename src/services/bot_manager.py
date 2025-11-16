@@ -246,7 +246,7 @@ class BotManager:
             raise BotManagerError(f"Grid bot {grid_bot_id} not found")
 
         try:
-            # Load open orders
+            # Load open orders from DB
             result = await self.db.execute(
                 select(GridOrder).where(
                     GridOrder.grid_bot_id == grid_bot_id,
@@ -257,7 +257,7 @@ class BotManager:
 
             cancelled_count = 0
 
-            # Cancel all open orders
+            # Cancel all open orders from DB
             for order in open_orders:
                 try:
                     await self.mexc.cancel_order(
@@ -274,6 +274,29 @@ class BotManager:
                 except MEXCError as e:
                     logger.warning(f"Failed to cancel order {order.id}: {e}")
                     # Continue with other orders
+
+            # Also cancel any orphaned orders on exchange (not in DB)
+            try:
+                exchange_orders = await self.mexc.get_open_orders(bot.user_id, bot.symbol)
+                for exchange_order in exchange_orders:
+                    order_id = str(exchange_order.get('id'))
+                    # Check if this order is already cancelled
+                    already_cancelled = any(
+                        o.exchange_order_id == order_id for o in open_orders
+                    )
+                    if not already_cancelled:
+                        try:
+                            await self.mexc.cancel_order(
+                                user_id=bot.user_id,
+                                symbol=bot.symbol,
+                                order_id=order_id
+                            )
+                            cancelled_count += 1
+                            logger.info(f"Cancelled orphaned order {order_id} on exchange")
+                        except MEXCError as e:
+                            logger.warning(f"Failed to cancel orphaned order {order_id}: {e}")
+            except Exception as e:
+                logger.warning(f"Failed to check exchange orders: {e}")
 
             # Save cancelled orders to DB
             if cancelled_count > 0:
