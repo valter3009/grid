@@ -38,11 +38,13 @@ async def show_balance(callback: CallbackQuery, db: AsyncSession):
             await callback.answer()
             return
 
-        # Show loading message
+        # Show loading message immediately
         await callback.message.edit_text(
-            "⏳ Загружаю баланс...",
-            reply_markup=get_back_button("main_menu")
+            "⏳ Загружаю баланс с MEXC...\n\n"
+            "Это может занять несколько секунд.",
+            reply_markup=None
         )
+        await callback.answer()
 
         # Get balance from MEXC
         mexc_service = MEXCService(db)
