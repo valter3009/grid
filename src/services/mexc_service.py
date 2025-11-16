@@ -241,6 +241,7 @@ class MEXCService:
         Raises:
             MEXCError: If API call fails
         """
+        exchange = None
         try:
             exchange = ccxt.mexc({'enableRateLimit': True})
 
@@ -250,8 +251,6 @@ class MEXCService:
                 raise MEXCError(f"Торговая пара {symbol} не найдена на MEXC")
 
             market = exchange.markets[symbol]
-
-            await exchange.close()
 
             return {
                 'min_order_amount': parse_decimal(market['limits']['amount']['min']),
@@ -265,9 +264,17 @@ class MEXCService:
                 'quote': market['quote'],
             }
 
+        except MEXCError:
+            # Re-raise MEXCError without wrapping
+            raise
+
         except Exception as e:
             logger.error(f"Error getting exchange info for {symbol}: {e}")
             raise MEXCError(f"Ошибка получения информации о паре: {str(e)}")
+
+        finally:
+            if exchange:
+                await exchange.close()
 
     async def create_limit_order(
         self,
