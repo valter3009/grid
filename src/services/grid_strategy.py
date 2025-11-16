@@ -79,7 +79,8 @@ class GridStrategy:
         grid_levels: int,
         current_price: Decimal,
         price_levels: List[Decimal],
-        amount_precision: int = 8
+        amount_precision: int = 8,
+        min_order_amount: Decimal = Decimal('0')
     ) -> Dict[int, Decimal]:
         """
         Calculate order amounts for each grid level.
@@ -89,6 +90,7 @@ class GridStrategy:
         2. Divide investment_amount equally between orders
         3. For buy orders: amount = (investment / num_buys) / price
         4. For sell orders: amount = (investment / num_sells) / price
+        5. Ensure all amounts meet minimum order requirements
 
         Args:
             investment_amount: Total investment amount
@@ -96,6 +98,7 @@ class GridStrategy:
             current_price: Current market price
             price_levels: List of grid price levels
             amount_precision: Precision for amounts
+            min_order_amount: Minimum order amount from exchange
 
         Returns:
             Dictionary {level_index: amount_in_base_currency}
@@ -121,14 +124,34 @@ class GridStrategy:
             for i in range(current_level_idx):
                 price = price_levels[i]
                 amount = (half_investment / Decimal(str(num_buy_levels))) / price
-                amounts[i] = round_down(amount, amount_precision)
+                amount = round_down(amount, amount_precision)
+
+                # Ensure amount meets minimum requirement
+                if amount < min_order_amount:
+                    logger.warning(
+                        f"Calculated amount {amount} is less than minimum {min_order_amount}, "
+                        f"using minimum amount"
+                    )
+                    amount = min_order_amount
+
+                amounts[i] = amount
 
         # Calculate amounts for sell orders (above current price)
         if num_sell_levels > 0:
             for i in range(current_level_idx + 1, len(price_levels)):
                 price = price_levels[i]
                 amount = (half_investment / Decimal(str(num_sell_levels))) / price
-                amounts[i] = round_down(amount, amount_precision)
+                amount = round_down(amount, amount_precision)
+
+                # Ensure amount meets minimum requirement
+                if amount < min_order_amount:
+                    logger.warning(
+                        f"Calculated amount {amount} is less than minimum {min_order_amount}, "
+                        f"using minimum amount"
+                    )
+                    amount = min_order_amount
+
+                amounts[i] = amount
 
         return amounts
 
@@ -178,6 +201,14 @@ class GridStrategy:
             exchange_info = await self.mexc.get_exchange_info(bot.symbol)
             amount_precision = exchange_info['amount_precision']
             price_precision = exchange_info['price_precision']
+            min_order_amount = exchange_info['min_order_amount']
+
+            logger.info(
+                f"Exchange info for {bot.symbol}: "
+                f"min_amount={min_order_amount}, "
+                f"amount_precision={amount_precision}, "
+                f"price_precision={price_precision}"
+            )
 
             # Calculate grid levels
             price_levels = self.calculate_grid_levels(
@@ -193,7 +224,8 @@ class GridStrategy:
                 bot.grid_levels,
                 current_price,
                 price_levels,
-                amount_precision
+                amount_precision,
+                min_order_amount
             )
 
             # Find current level
