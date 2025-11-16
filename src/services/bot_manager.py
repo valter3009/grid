@@ -72,8 +72,15 @@ class BotManager:
 
             logger.info(f"Created bot #{grid_bot.id}, creating initial orders...")
 
+            # Get current price
+            current_price = await self.mexc.get_current_price(symbol)
+            logger.info(f"Current {symbol} price: ${current_price}")
+
             # Create initial grid orders
-            orders_created = await self.grid_strategy.create_initial_orders(grid_bot.id)
+            orders_created = await self.grid_strategy.create_initial_orders(
+                grid_bot.id,
+                current_price
+            )
 
             if not orders_created:
                 logger.error(f"Failed to create initial orders for bot #{grid_bot.id}")
