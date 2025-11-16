@@ -124,41 +124,18 @@ async def show_bot_details(callback: CallbackQuery, db: AsyncSession):
         else:
             runtime_text = "—"
 
-        # Format parameters based on grid type
-        # Check if this is a flat grid bot (grid_type == 'flat' and has flat grid parameters)
-        is_flat_grid = (
-            bot.grid_type == 'flat' and
-            bot.order_size is not None and
-            bot.flat_spread is not None
+        # Flat grid parameters (only flat grid is supported now)
+        total_capital = (bot.buy_orders_count + bot.sell_orders_count) * bot.order_size
+        params_text = (
+            f"💰 Параметры:\n"
+            f"• Размер ордера: ${float(bot.order_size):.2f}\n"
+            f"• Спред: ${float(bot.flat_spread):.2f}\n"
+            f"• Шаг сетки: ${float(bot.flat_increment):.2f}\n"
+            f"• Buy ордеров: {bot.buy_orders_count}\n"
+            f"• Sell ордеров: {bot.sell_orders_count}\n"
+            f"• Начальная цена: {'Рыночная' if bot.starting_price == 0 else f'${float(bot.starting_price):.2f}'}\n"
+            f"• Всего капитала: ${float(total_capital):.2f}\n"
         )
-
-        if is_flat_grid:
-            # Flat grid parameters
-            total_capital = (bot.buy_orders_count + bot.sell_orders_count) * bot.order_size
-            params_text = (
-                f"💰 Параметры (Flat Grid):\n"
-                f"• Размер ордера: ${float(bot.order_size):.2f}\n"
-                f"• Спред: ${float(bot.flat_spread):.2f}\n"
-                f"• Шаг сетки: ${float(bot.flat_increment):.2f}\n"
-                f"• Buy ордеров: {bot.buy_orders_count}\n"
-                f"• Sell ордеров: {bot.sell_orders_count}\n"
-                f"• Начальная цена: {'Рыночная' if bot.starting_price == 0 else f'${float(bot.starting_price):.2f}'}\n"
-                f"• Всего капитала: ${float(total_capital):.2f}\n"
-            )
-        else:
-            # Range grid parameters (including old bots with grid_type = None)
-            # Safe formatting with None checks
-            investment = float(bot.investment_amount) if bot.investment_amount else 0.0
-            lower = float(bot.lower_price) if bot.lower_price else 0.0
-            upper = float(bot.upper_price) if bot.upper_price else 0.0
-            levels = bot.grid_levels if bot.grid_levels else 0
-
-            params_text = (
-                f"💰 Параметры (Range Grid):\n"
-                f"• Инвестиция: ${investment:.2f}\n"
-                f"• Диапазон: ${lower:.2f} - ${upper:.2f}\n"
-                f"• Уровней сетки: {levels}\n"
-            )
 
         text = (
             f"🤖 Бот #{bot.id}\n\n"
