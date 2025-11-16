@@ -613,6 +613,9 @@ async def confirm_and_start_bot(callback: CallbackQuery, state: FSMContext, db: 
             await state.clear()
             return
 
+        # Answer callback immediately to avoid timeout
+        await callback.answer()
+
         # Show progress
         await callback.message.edit_text(
             "⏳ Создаю бота и размещаю ордера...\n"
@@ -662,17 +665,23 @@ async def confirm_and_start_bot(callback: CallbackQuery, state: FSMContext, db: 
             )
 
         await state.clear()
-        await callback.answer()
 
     except Exception as e:
         logger.error(f"Error creating bot: {e}", exc_info=True)
-        await callback.message.edit_text(
-            "❌ Произошла ошибка при создании бота\n\n"
-            "Попробуйте позже.",
-            reply_markup=get_back_button("main_menu")
-        )
+        try:
+            await callback.message.edit_text(
+                "❌ Произошла ошибка при создании бота\n\n"
+                "Попробуйте позже.",
+                reply_markup=get_back_button("main_menu")
+            )
+        except Exception:
+            # If edit fails, send new message
+            await callback.message.answer(
+                "❌ Произошла ошибка при создании бота\n\n"
+                "Попробуйте позже.",
+                reply_markup=get_back_button("main_menu")
+            )
         await state.clear()
-        await callback.answer()
 
 
 @router.callback_query(F.data == "confirm:edit", CreateBotStates.confirmation)
