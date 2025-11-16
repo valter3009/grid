@@ -24,7 +24,7 @@ class APISetupStates(StatesGroup):
 
 
 @router.callback_query(F.data == "settings_api")
-async def show_api_settings(callback: CallbackQuery, db: AsyncSession):
+async def show_api_settings(callback: CallbackQuery, state: FSMContext, db: AsyncSession):
     """Show API settings."""
     try:
         # Get user
@@ -66,8 +66,8 @@ async def show_api_settings(callback: CallbackQuery, db: AsyncSession):
 
         if not user.has_api_keys:
             # Start API setup flow
+            await state.set_state(APISetupStates.waiting_for_api_key)
             await callback.answer()
-            # Don't set state here, wait for user to send API key
 
     except Exception as e:
         logger.error(f"Error showing API settings: {e}")
@@ -81,7 +81,7 @@ async def process_api_key(message: Message, state: FSMContext, db: AsyncSession)
         api_key = message.text.strip()
 
         # Validate format (basic check)
-        if len(api_key) < 20:
+        if len(api_key) < 10:
             await message.answer(
                 "❌ API key слишком короткий. Пожалуйста, отправьте корректный API key."
             )
@@ -108,7 +108,7 @@ async def process_api_secret(message: Message, state: FSMContext, db: AsyncSessi
         api_secret = message.text.strip()
 
         # Validate format
-        if len(api_secret) < 20:
+        if len(api_secret) < 10:
             await message.answer(
                 "❌ API secret слишком короткий. Пожалуйста, отправьте корректный API secret."
             )
@@ -130,9 +130,10 @@ async def process_api_secret(message: Message, state: FSMContext, db: AsyncSessi
         status_msg = await message.answer("⏳ Проверяю ключи...")
 
         mexc_service = MEXCService(db)
-        is_valid, error = await mexc_service.test_api_keys(api_key, api_secret)
+        result = await mexc_service.test_api_keys(api_key, api_secret)
 
-        if not is_valid:
+        if not result['valid']:
+            error = result.get('error', 'Неизвестная ошибка')
             await status_msg.edit_text(
                 f"❌ API ключи недействительны\n\n"
                 f"Ошибка: {error}\n\n"
@@ -182,21 +183,3 @@ async def process_api_secret(message: Message, state: FSMContext, db: AsyncSessi
         await state.clear()
 
 
-# Handler to start API setup flow when user sends message after clicking settings_api
-@router.message(F.text)
-async def handle_api_key_input(message: Message, state: FSMContext, db: AsyncSession):
-    """Handle API key input when no state is set."""
-    current_state = await state.get_state()
-
-    # Only process if we're not in any other state
-    if current_state is None:
-        # Check if user recently clicked on API settings
-        result = await db.execute(
-            select(User).where(User.telegram_id == message.from_user.id)
-        )
-        user = result.scalar_one_or_none()
-
-        if user and not user.has_api_keys:
-            # Assume this is API key input
-            await state.set_state(APISetupStates.waiting_for_api_key)
-            await process_api_key(message, state, db)
