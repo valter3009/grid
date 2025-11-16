@@ -277,45 +277,84 @@ class GridStrategy:
                         logger.error(f"Failed to create buy order at level {level_idx}: {e}")
                         # Continue with other orders
 
+            # Calculate total amount needed for sell orders
+            total_sell_amount = Decimal('0')
+            for level_idx, amount in order_amounts.items():
+                if level_idx > current_level_idx:
+                    total_sell_amount += amount
+
+            # Buy base currency for sell orders if needed
+            if total_sell_amount > 0:
+                try:
+                    # Add 1% buffer for safety
+                    buy_amount = total_sell_amount * Decimal('1.01')
+                    buy_amount = round_down(buy_amount, amount_precision)
+
+                    logger.info(
+                        f"Buying {buy_amount} {bot.symbol.split('/')[0]} for sell orders "
+                        f"(needed: {total_sell_amount})"
+                    )
+
+                    # Buy base currency at market price
+                    market_order = await self.mexc.create_market_order(
+                        user_id=bot.user_id,
+                        symbol=bot.symbol,
+                        side='buy',
+                        amount=buy_amount
+                    )
+
+                    logger.info(
+                        f"Bought {buy_amount} at market price: "
+                        f"{market_order.get('average_price', 'N/A')}"
+                    )
+
+                except MEXCError as e:
+                    logger.error(f"Failed to buy base currency for sell orders: {e}")
+                    # If we can't buy base currency, we can't create sell orders
+                    # But we still have buy orders created, so bot is partially functional
+                    logger.warning("Sell orders will not be created due to market buy failure")
+                    total_sell_amount = Decimal('0')  # Skip sell order creation
+
             # Create SELL limit orders above current price
             # In Grid trading, we place sell orders above current price
             # They will be filled when price goes up, then we create buy orders
-            for level_idx, amount in order_amounts.items():
-                if level_idx > current_level_idx:
-                    price = round_down(price_levels[level_idx], price_precision)
+            if total_sell_amount > 0:
+                for level_idx, amount in order_amounts.items():
+                    if level_idx > current_level_idx:
+                        price = round_down(price_levels[level_idx], price_precision)
 
-                    try:
-                        order = await self.mexc.create_limit_order(
-                            user_id=bot.user_id,
-                            symbol=bot.symbol,
-                            side='sell',
-                            price=price,
-                            amount=amount
-                        )
+                        try:
+                            order = await self.mexc.create_limit_order(
+                                user_id=bot.user_id,
+                                symbol=bot.symbol,
+                                side='sell',
+                                price=price,
+                                amount=amount
+                            )
 
-                        # Save to DB
-                        db_order = GridOrder(
-                            grid_bot_id=grid_bot_id,
-                            exchange_order_id=order['order_id'],
-                            side='sell',
-                            order_type='limit',
-                            level=level_idx,
-                            price=price,
-                            amount=amount,
-                            total=price * amount,
-                            status='open'
-                        )
-                        self.db.add(db_order)
-                        sell_orders.append(order)
+                            # Save to DB
+                            db_order = GridOrder(
+                                grid_bot_id=grid_bot_id,
+                                exchange_order_id=order['order_id'],
+                                side='sell',
+                                order_type='limit',
+                                level=level_idx,
+                                price=price,
+                                amount=amount,
+                                total=price * amount,
+                                status='open'
+                            )
+                            self.db.add(db_order)
+                            sell_orders.append(order)
 
-                        logger.info(
-                            f"Created sell order at level {level_idx}: "
-                            f"{amount} @ {price}"
-                        )
+                            logger.info(
+                                f"Created sell order at level {level_idx}: "
+                                f"{amount} @ {price}"
+                            )
 
-                    except MEXCError as e:
-                        logger.error(f"Failed to create sell order at level {level_idx}: {e}")
-                        # Continue with other orders
+                        except MEXCError as e:
+                            logger.error(f"Failed to create sell order at level {level_idx}: {e}")
+                            # Continue with other orders
 
             # Commit all orders to DB
             await self.db.commit()
