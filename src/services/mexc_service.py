@@ -428,6 +428,7 @@ class MEXCService:
         Raises:
             MEXCError: If cancellation fails
         """
+        exchange = None
         try:
             exchange = await self._get_exchange(user_id)
 
@@ -439,6 +440,7 @@ class MEXCService:
                 exceptions=(ccxt.NetworkError,)
             )
 
+            logger.info(f"Cancelled order {order_id} for {symbol}")
             return True
 
         except ccxt.OrderNotFound as e:
@@ -448,6 +450,10 @@ class MEXCService:
         except Exception as e:
             logger.error(f"Error cancelling order {order_id}: {e}")
             raise MEXCError(f"Ошибка отмены ордера: {str(e)}")
+
+        finally:
+            if exchange:
+                await exchange.close()
 
     async def get_order_status(self, user_id: int, symbol: str, order_id: str) -> dict:
         """

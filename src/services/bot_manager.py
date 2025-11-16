@@ -269,10 +269,16 @@ class BotManager:
                     order.status = 'cancelled'
                     order.cancelled_at = datetime.utcnow()
                     cancelled_count += 1
+                    logger.info(f"Cancelled order {order.exchange_order_id} on exchange")
 
                 except MEXCError as e:
                     logger.warning(f"Failed to cancel order {order.id}: {e}")
                     # Continue with other orders
+
+            # Save cancelled orders to DB
+            if cancelled_count > 0:
+                await self.db.commit()
+                logger.info(f"Saved {cancelled_count} cancelled orders to DB")
 
             # Sell all assets if requested
             if sell_all:
@@ -396,6 +402,70 @@ class BotManager:
 
         logger.info(f"Grid bot {grid_bot_id} resumed")
         return True
+
+    async def delete_bot(self, grid_bot_id: int) -> bool:
+        """
+        Delete grid bot completely.
+
+        Algorithm:
+        1. Stop bot if active (cancel all orders)
+        2. Delete all related records (orders, logs)
+        3. Delete bot from DB
+
+        Args:
+            grid_bot_id: Grid bot ID
+
+        Returns:
+            True if deleted successfully
+
+        Raises:
+            BotManagerError: If deletion fails
+        """
+        # Load bot
+        result = await self.db.execute(
+            select(GridBot).where(GridBot.id == grid_bot_id)
+        )
+        bot = result.scalar_one_or_none()
+
+        if not bot:
+            raise BotManagerError(f"Grid bot {grid_bot_id} not found")
+
+        try:
+            # Stop bot if active (cancel orders)
+            if bot.status in ['active', 'paused']:
+                logger.info(f"Stopping active bot {grid_bot_id} before deletion")
+                await self.stop_bot(grid_bot_id, sell_all=False)
+
+            # Delete all orders
+            await self.db.execute(
+                select(GridOrder).where(GridOrder.grid_bot_id == grid_bot_id)
+            )
+            result = await self.db.execute(
+                select(GridOrder).where(GridOrder.grid_bot_id == grid_bot_id)
+            )
+            orders = result.scalars().all()
+            for order in orders:
+                await self.db.delete(order)
+
+            # Delete all logs
+            result = await self.db.execute(
+                select(BotLog).where(BotLog.grid_bot_id == grid_bot_id)
+            )
+            logs = result.scalars().all()
+            for log in logs:
+                await self.db.delete(log)
+
+            # Delete bot
+            await self.db.delete(bot)
+            await self.db.commit()
+
+            logger.info(f"Grid bot {grid_bot_id} deleted successfully")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error deleting bot {grid_bot_id}: {e}")
+            await self.db.rollback()
+            raise BotManagerError(f"Ошибка удаления бота: {str(e)}")
 
     async def get_bot_statistics(self, grid_bot_id: int) -> dict:
         """
