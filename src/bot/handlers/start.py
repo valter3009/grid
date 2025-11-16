@@ -117,16 +117,87 @@ async def show_main_menu(callback: CallbackQuery, db: AsyncSession):
 
 
 @router.callback_query(F.data == "settings")
-async def show_settings(callback: CallbackQuery):
+async def show_settings(callback: CallbackQuery, db: AsyncSession):
     """Show settings menu."""
+    # Get user to show API status
+    result = await db.execute(
+        select(User).where(User.telegram_id == callback.from_user.id)
+    )
+    user = result.scalar_one_or_none()
+
+    if not user:
+        await callback.answer("Пожалуйста, отправьте /start")
+        return
+
+    api_status = "✅ Подключено" if user.has_api_keys else "❌ Не настроено"
+
     text = (
         "⚙️ Настройки\n\n"
+        f"🔑 MEXC API: {api_status}\n\n"
         "Выберите, что хотите настроить:"
     )
 
     await callback.message.edit_text(
         text,
         reply_markup=get_settings_keyboard()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "settings_language")
+async def show_language_settings(callback: CallbackQuery, db: AsyncSession):
+    """Show language settings."""
+    result = await db.execute(
+        select(User).where(User.telegram_id == callback.from_user.id)
+    )
+    user = result.scalar_one_or_none()
+
+    if not user:
+        await callback.answer("Пожалуйста, отправьте /start")
+        return
+
+    text = (
+        "🌐 Язык / Language\n\n"
+        f"Текущий язык: Русский 🇷🇺\n\n"
+        f"⚠️ В данный момент поддерживается только русский язык.\n"
+        f"Поддержка других языков будет добавлена в будущих обновлениях."
+    )
+
+    from src.bot.keyboards.inline import get_back_button
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_back_button("settings")
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "settings_notifications")
+async def show_notifications_settings(callback: CallbackQuery, db: AsyncSession):
+    """Show notifications settings."""
+    result = await db.execute(
+        select(User).where(User.telegram_id == callback.from_user.id)
+    )
+    user = result.scalar_one_or_none()
+
+    if not user:
+        await callback.answer("Пожалуйста, отправьте /start")
+        return
+
+    text = (
+        "🔔 Уведомления\n\n"
+        f"{'✅' if user.notifications_enabled else '❌'} Все уведомления: {'Вкл' if user.notifications_enabled else 'Выкл'}\n"
+        f"{'✅' if user.notify_order_filled else '❌'} Исполнение ордеров: {'Вкл' if user.notify_order_filled else 'Выкл'}\n"
+        f"{'✅' if user.notify_profit else '❌'} Прибыль: {'Вкл' if user.notify_profit else 'Выкл'}\n"
+        f"{'✅' if user.notify_errors else '❌'} Ошибки: {'Вкл' if user.notify_errors else 'Выкл'}\n"
+        f"{'✅' if user.daily_summary else '❌'} Ежедневная сводка: {'Вкл' if user.daily_summary else 'Выкл'}\n\n"
+        f"📊 Уведомлять о прибыли от {user.profit_notify_percent}%\n\n"
+        f"⚠️ Настройка уведомлений будет доступна в следующих обновлениях."
+    )
+
+    from src.bot.keyboards.inline import get_back_button
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_back_button("settings")
     )
     await callback.answer()
 

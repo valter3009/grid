@@ -101,7 +101,8 @@ async def process_pair_selection(callback: CallbackQuery, state: FSMContext, db:
             return
 
         # Validate pair and get current price
-        symbol = pair_value.replace('/', '')  # BTCUSDT
+        # Keep the slash format for CCXT API (BTC/USDT)
+        symbol = pair_value
 
         mexc_service = MEXCService(db)
         current_price = await mexc_service.get_current_price(symbol)
@@ -152,7 +153,8 @@ async def process_custom_pair(message: Message, state: FSMContext, db: AsyncSess
             )
             return
 
-        symbol = pair.replace('/', '')
+        # Keep slash format for CCXT API
+        symbol = pair
 
         # Validate with MEXC
         mexc_service = MEXCService(db)

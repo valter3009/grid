@@ -29,6 +29,84 @@ class BotManager:
         self.mexc = mexc_service
         self.grid_strategy = grid_strategy
 
+    async def create_bot(
+        self,
+        user_id: int,
+        symbol: str,
+        lower_price: float,
+        upper_price: float,
+        grid_levels: int,
+        investment_amount: float
+    ) -> Optional[GridBot]:
+        """
+        Create and start new grid bot.
+
+        Args:
+            user_id: User ID
+            symbol: Trading pair symbol (e.g., BTCUSDT)
+            lower_price: Lower price boundary
+            upper_price: Upper price boundary
+            grid_levels: Number of grid levels
+            investment_amount: Total investment amount in USDT
+
+        Returns:
+            GridBot instance if created successfully, None otherwise
+        """
+        try:
+            logger.info(f"Creating grid bot for user {user_id}: {symbol}, ${investment_amount}")
+
+            # Create bot record
+            grid_bot = GridBot(
+                user_id=user_id,
+                symbol=symbol,
+                lower_price=Decimal(str(lower_price)),
+                upper_price=Decimal(str(upper_price)),
+                grid_levels=grid_levels,
+                investment_amount=Decimal(str(investment_amount)),
+                status='active',
+                started_at=datetime.utcnow()
+            )
+            self.db.add(grid_bot)
+            await self.db.commit()
+            await self.db.refresh(grid_bot)
+
+            logger.info(f"Created bot #{grid_bot.id}, creating initial orders...")
+
+            # Get current price
+            current_price = await self.mexc.get_current_price(symbol)
+            logger.info(f"Current {symbol} price: ${current_price}")
+
+            # Create initial grid orders
+            orders_created = await self.grid_strategy.create_initial_orders(
+                grid_bot.id,
+                current_price
+            )
+
+            if not orders_created:
+                logger.error(f"Failed to create initial orders for bot #{grid_bot.id}")
+                grid_bot.status = 'stopped'
+                await self.db.commit()
+                return None
+
+            logger.info(f"Bot #{grid_bot.id} created successfully with {orders_created} orders")
+
+            # Log bot creation
+            log = BotLog(
+                user_id=user_id,
+                grid_bot_id=grid_bot.id,
+                event_type='bot_created',
+                message=f'Grid bot created: {symbol}, levels={grid_levels}, investment=${investment_amount}'
+            )
+            self.db.add(log)
+            await self.db.commit()
+
+            return grid_bot
+
+        except Exception as e:
+            logger.error(f"Error creating grid bot: {e}", exc_info=True)
+            await self.db.rollback()
+            return None
+
     async def start_bot(self, grid_bot_id: int) -> bool:
         """
         Start grid bot.

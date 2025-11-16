@@ -50,19 +50,22 @@ def get_price_suggestions_keyboard(current_price: float, is_lower: bool = True) 
         current_price: Current market price
         is_lower: True for lower bound, False for upper bound
     """
+    # Convert to float if Decimal
+    price = float(current_price)
+
     if is_lower:
         # Suggest prices below current
         prices = [
-            current_price * 0.90,
-            current_price * 0.95,
-            current_price * 0.97
+            price * 0.90,
+            price * 0.95,
+            price * 0.97
         ]
     else:
         # Suggest prices above current
         prices = [
-            current_price * 1.03,
-            current_price * 1.05,
-            current_price * 1.10
+            price * 1.03,
+            price * 1.05,
+            price * 1.10
         ]
 
     return InlineKeyboardMarkup(inline_keyboard=[
