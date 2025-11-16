@@ -130,9 +130,10 @@ async def process_api_secret(message: Message, state: FSMContext, db: AsyncSessi
         status_msg = await message.answer("⏳ Проверяю ключи...")
 
         mexc_service = MEXCService(db)
-        is_valid, error = await mexc_service.test_api_keys(api_key, api_secret)
+        result = await mexc_service.test_api_keys(api_key, api_secret)
 
-        if not is_valid:
+        if not result['valid']:
+            error = result.get('error', 'Неизвестная ошибка')
             await status_msg.edit_text(
                 f"❌ API ключи недействительны\n\n"
                 f"Ошибка: {error}\n\n"
