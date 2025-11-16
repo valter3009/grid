@@ -150,10 +150,10 @@ class HealthCheck:
         AUTOMATICALLY fix found issues.
 
         Fixes:
-        1. Orphaned assets → create sell order
-        2. Missing orders → create
-        3. Duplicate orders → cancel extras
-        4. Out-of-range orders → cancel
+        1. Duplicate orders → cancel extras
+
+        Note: Orphaned assets and out-of-range orders are NOT auto-fixed
+        to prevent unwanted order creation/cancellation.
 
         Args:
             grid_bot_id: Grid bot ID
@@ -178,15 +178,7 @@ class HealthCheck:
             return {'fixed': [], 'failed': ['Bot not found']}
 
         try:
-            # Fix orphaned assets
-            if 'Orphaned assets detected' in issues:
-                result = await self.handle_orphaned_assets(grid_bot_id)
-                if result['success']:
-                    fixed.append('Fixed orphaned assets')
-                else:
-                    failed.append('Failed to fix orphaned assets')
-
-            # Fix duplicate orders
+            # Fix duplicate orders (only safe auto-fix)
             if 'Duplicate orders found' in issues:
                 result = await self._fix_duplicate_orders(bot)
                 if result['fixed']:
@@ -363,14 +355,51 @@ class HealthCheck:
             return {'success': False, 'created_orders': 0}
 
     async def _check_orphaned_assets(self, bot: GridBot) -> dict:
-        """Check for orphaned assets."""
+        """Check for orphaned assets without auto-fixing."""
         try:
-            result = await self.handle_orphaned_assets(bot.id)
+            # Get base currency balance
+            base_currency = bot.base_currency or bot.symbol.split('/')[0]
+            balances = await self.mexc.get_balance(bot.user_id)
+            balance = balances.get(base_currency, Decimal('0'))
+
+            if balance == 0:
+                return {'has_orphaned': False, 'auto_fixed': False}
+
+            # Get all sell orders
+            result = await self.db.execute(
+                select(GridOrder).where(
+                    GridOrder.grid_bot_id == bot.id,
+                    GridOrder.side == 'sell',
+                    GridOrder.status == 'open'
+                )
+            )
+            sell_orders = result.scalars().all()
+
+            # Calculate total amount in sell orders
+            total_in_orders = sum(order.amount for order in sell_orders)
+
+            # Check for orphaned amount
+            orphaned_amount = balance - total_in_orders
+
+            # Get exchange info for minimum check
+            exchange_info = await self.mexc.get_exchange_info(bot.symbol)
+            min_amount = exchange_info['min_order_amount']
+
+            # Only report if orphaned amount is significant
+            has_orphaned = orphaned_amount > min_amount
+
+            if has_orphaned:
+                logger.info(
+                    f"Bot {bot.id} has orphaned assets: {orphaned_amount} {base_currency} "
+                    f"(not auto-creating sell order)"
+                )
+
             return {
-                'has_orphaned': result['created_orders'] > 0,
-                'auto_fixed': result['success']
+                'has_orphaned': has_orphaned,
+                'auto_fixed': False  # Don't auto-create orders, just report
             }
-        except Exception:
+        except Exception as e:
+            logger.error(f"Error checking orphaned assets: {e}")
             return {'has_orphaned': False, 'auto_fixed': False}
 
     async def _check_order_count(self, bot: GridBot) -> dict:
@@ -394,7 +423,7 @@ class HealthCheck:
         }
 
     async def _check_order_prices(self, bot: GridBot) -> dict:
-        """Check if orders are within price range."""
+        """Check if orders are within price range (without auto-cancelling)."""
         result = await self.db.execute(
             select(GridOrder).where(
                 GridOrder.grid_bot_id == bot.id,
@@ -404,30 +433,21 @@ class HealthCheck:
         orders = result.scalars().all()
 
         out_of_range = []
-        cancelled = 0
 
         for order in orders:
             if order.price < bot.lower_price or order.price > bot.upper_price:
                 out_of_range.append(order)
 
-                # Auto-cancel out-of-range orders
-                try:
-                    await self.mexc.cancel_order(
-                        user_id=bot.user_id,
-                        symbol=bot.symbol,
-                        order_id=order.exchange_order_id
-                    )
-                    order.status = 'cancelled'
-                    cancelled += 1
-                except Exception as e:
-                    logger.error(f"Failed to cancel out-of-range order: {e}")
-
-        if cancelled > 0:
-            await self.db.commit()
+        # Just log, don't auto-cancel (grid orders are supposed to be outside current price)
+        if out_of_range:
+            logger.info(
+                f"Bot {bot.id} has {len(out_of_range)} orders outside configured range "
+                f"(this is normal for grid trading)"
+            )
 
         return {
             'out_of_range': out_of_range,
-            'cancelled': cancelled
+            'cancelled': 0  # Don't auto-cancel grid orders
         }
 
     async def _check_duplicate_orders(self, bot: GridBot) -> dict:
