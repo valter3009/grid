@@ -21,14 +21,22 @@ class GridBot(Base):
     base_currency = Column(String(20), nullable=True)  # e.g., BTC
     quote_currency = Column(String(20), nullable=True)  # e.g., USDT
 
-    # Grid parameters
-    lower_price = Column(DECIMAL(20, 8), nullable=False)
-    upper_price = Column(DECIMAL(20, 8), nullable=False)
-    grid_levels = Column(Integer, nullable=False)
-    investment_amount = Column(DECIMAL(20, 8), nullable=False)
+    # Grid parameters (range grid - старая логика)
+    lower_price = Column(DECIMAL(20, 8), nullable=True)
+    upper_price = Column(DECIMAL(20, 8), nullable=True)
+    grid_levels = Column(Integer, nullable=True)
+    investment_amount = Column(DECIMAL(20, 8), nullable=True)
 
-    # Grid type (для MVP только arithmetic)
-    grid_type = Column(String(20), default="arithmetic")
+    # Flat grid parameters (новая логика)
+    flat_spread = Column(DECIMAL(20, 8), nullable=True)  # Спред между buy и sell ордерами
+    flat_increment = Column(DECIMAL(20, 8), nullable=True)  # Шаг между уровнями сетки
+    buy_orders_count = Column(Integer, nullable=True)  # Количество buy ордеров
+    sell_orders_count = Column(Integer, nullable=True)  # Количество sell ордеров
+    starting_price = Column(DECIMAL(20, 8), nullable=True)  # Начальная цена (0 = текущая рыночная)
+    order_size = Column(DECIMAL(20, 8), nullable=True)  # Размер одного ордера в USDT
+
+    # Grid type: "arithmetic" (range) или "flat"
+    grid_type = Column(String(20), default="flat")
 
     # Status: active, paused, stopped
     status = Column(String(20), default="active", index=True)
