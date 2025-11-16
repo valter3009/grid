@@ -131,7 +131,7 @@ class GridStrategy:
                 # Round up to next precision to ensure we meet minimum cost
                 amount = round_down(amount, amount_precision)
                 # Add one more unit of precision to be safe
-                precision_unit = Decimal('10') ** -amount_precision
+                precision_unit = Decimal('10') ** -int(amount_precision)
                 amount = amount + precision_unit
 
                 logger.info(
@@ -162,7 +162,7 @@ class GridStrategy:
                 # Round up to next precision to ensure we meet minimum cost
                 amount = round_down(amount, amount_precision)
                 # Add one more unit of precision to be safe
-                precision_unit = Decimal('10') ** -amount_precision
+                precision_unit = Decimal('10') ** -int(amount_precision)
                 amount = amount + precision_unit
 
                 logger.info(
