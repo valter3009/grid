@@ -507,13 +507,23 @@ async def process_investment(callback: CallbackQuery, state: FSMContext, db: Asy
 
         investment = float(investment_value)
 
-        # Get user balance
+        # Get user and symbol data
         result = await db.execute(
             select(User).where(User.telegram_id == callback.from_user.id)
         )
         user = result.scalar_one_or_none()
 
+        data = await state.get_data()
+        symbol = data.get('symbol')
+
+        # Get exchange info to check minimum order cost
         mexc_service = MEXCService(db)
+        exchange_info = await mexc_service.get_exchange_info(symbol)
+        min_order_cost = float(exchange_info['min_order_cost'])
+
+        # Set minimum to exchange minimum or $2 as fallback
+        min_investment = max(min_order_cost, 2.0)
+
         balances = await mexc_service.get_balance(user.id)
         usdt_balance = balances.get('USDT', 0)
 
@@ -521,8 +531,8 @@ async def process_investment(callback: CallbackQuery, state: FSMContext, db: Asy
             await callback.answer(f"❌ Недостаточно средств. Доступно: ${usdt_balance:.2f}")
             return
 
-        if investment < 10:
-            await callback.answer("❌ Минимальная инвестиция: $10")
+        if investment < min_investment:
+            await callback.answer(f"❌ Минимальный размер ордера: ${min_investment:.2f}")
             return
 
         await state.update_data(investment_amount=investment)
@@ -564,17 +574,27 @@ async def process_custom_investment(message: Message, state: FSMContext, db: Asy
             await message.answer("❌ Введите корректное число")
             return
 
-        if investment < 10:
-            await message.answer("❌ Минимальная инвестиция: $10")
-            return
-
-        # Get balance
+        # Get user and symbol data
         result = await db.execute(
             select(User).where(User.telegram_id == message.from_user.id)
         )
         user = result.scalar_one_or_none()
 
+        data = await state.get_data()
+        symbol = data.get('symbol')
+
+        # Get exchange info to check minimum order cost
         mexc_service = MEXCService(db)
+        exchange_info = await mexc_service.get_exchange_info(symbol)
+        min_order_cost = float(exchange_info['min_order_cost'])
+
+        # Set minimum to exchange minimum or $2 as fallback
+        min_investment = max(min_order_cost, 2.0)
+
+        if investment < min_investment:
+            await message.answer(f"❌ Минимальный размер ордера: ${min_investment:.2f}")
+            return
+
         balances = await mexc_service.get_balance(user.id)
         usdt_balance = balances.get('USDT', 0)
 

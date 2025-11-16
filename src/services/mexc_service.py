@@ -398,6 +398,9 @@ class MEXCService:
                 exceptions=(ccxt.NetworkError,)
             )
 
+            if not order or not isinstance(order, dict):
+                raise MEXCError("Exchange returned invalid response")
+
             return {
                 'order_id': str(order['id']),
                 'status': order['status'],
@@ -412,6 +415,10 @@ class MEXCService:
         except ccxt.InsufficientFunds as e:
             logger.error(f"Insufficient funds for market order: {e}")
             raise MEXCError("Недостаточно средств")
+
+        except ccxt.InvalidOrder as e:
+            logger.error(f"Invalid market order: {e}")
+            raise MEXCError(f"Неверные параметры ордера: {str(e)}")
 
         except Exception as e:
             logger.error(f"Error creating market order: {e}")
