@@ -114,17 +114,30 @@ class GridStrategy:
         # Calculate amounts for buy orders (lower price levels)
         for i in range(num_buy_levels):
             price = price_levels[i]
-            # Each order has the same USDT value
+            # Each order should have the same USDT value (order_size)
             amount = order_size / price
             amount = round_down(amount, amount_precision)
 
             # Ensure amount meets minimum requirement
             if amount < min_order_amount:
-                logger.warning(
-                    f"Calculated amount {amount} is less than minimum {min_order_amount}, "
-                    f"using minimum amount"
-                )
                 amount = min_order_amount
+
+            # Also ensure the order cost meets the order_size
+            # If amount * price < order_size, increase amount
+            order_cost = amount * price
+            if order_cost < order_size:
+                # Recalculate amount to meet exact order_size
+                amount = order_size / price
+                # Round up to next precision to ensure we meet minimum cost
+                amount = round_down(amount, amount_precision)
+                # Add one more unit of precision to be safe
+                precision_unit = Decimal('10') ** -amount_precision
+                amount = amount + precision_unit
+
+                logger.info(
+                    f"Adjusted amount to {amount} to meet order_size ${order_size} "
+                    f"at price ${price}"
+                )
 
             amounts[i] = amount
 
@@ -133,17 +146,29 @@ class GridStrategy:
         for i in range(num_sell_levels):
             level_idx = num_buy_levels + i
             price = price_levels[level_idx]
-            # Each order has the same USDT value
+            # Each order should have the same USDT value (order_size)
             amount = order_size / price
             amount = round_down(amount, amount_precision)
 
             # Ensure amount meets minimum requirement
             if amount < min_order_amount:
-                logger.warning(
-                    f"Calculated amount {amount} is less than minimum {min_order_amount}, "
-                    f"using minimum amount"
-                )
                 amount = min_order_amount
+
+            # Also ensure the order cost meets the order_size
+            order_cost = amount * price
+            if order_cost < order_size:
+                # Recalculate amount to meet exact order_size
+                amount = order_size / price
+                # Round up to next precision to ensure we meet minimum cost
+                amount = round_down(amount, amount_precision)
+                # Add one more unit of precision to be safe
+                precision_unit = Decimal('10') ** -amount_precision
+                amount = amount + precision_unit
+
+                logger.info(
+                    f"Adjusted amount to {amount} to meet order_size ${order_size} "
+                    f"at price ${price}"
+                )
 
             amounts[level_idx] = amount
 

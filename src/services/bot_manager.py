@@ -279,7 +279,11 @@ class BotManager:
             try:
                 exchange_orders = await self.mexc.get_open_orders(bot.user_id, bot.symbol)
                 for exchange_order in exchange_orders:
-                    order_id = str(exchange_order.get('id'))
+                    order_id = exchange_order.get('order_id')  # Correct field name
+                    if not order_id:
+                        logger.warning(f"Exchange order missing ID: {exchange_order}")
+                        continue
+
                     # Check if this order is already cancelled
                     already_cancelled = any(
                         o.exchange_order_id == order_id for o in open_orders

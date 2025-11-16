@@ -532,6 +532,7 @@ class MEXCService:
         Raises:
             MEXCError: If API call fails
         """
+        exchange = None
         try:
             exchange = await self._get_exchange(user_id)
 
@@ -554,12 +555,16 @@ class MEXCService:
                     'remaining': parse_decimal(order.get('remaining', 0)),
                     'timestamp': order.get('timestamp'),
                 }
-                for order in orders
+                for order in orders if order
             ]
 
         except Exception as e:
             logger.error(f"Error getting open orders: {e}")
             raise MEXCError(f"Ошибка получения открытых ордеров: {str(e)}")
+
+        finally:
+            if exchange:
+                await exchange.close()
 
     async def close_all(self):
         """Close all exchange connections."""
