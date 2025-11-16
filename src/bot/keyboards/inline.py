@@ -88,13 +88,13 @@ def get_grid_levels_keyboard() -> InlineKeyboardMarkup:
     """Get grid levels selection keyboard."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="5", callback_data="levels:5"),
+            InlineKeyboardButton(text="6", callback_data="levels:6"),
             InlineKeyboardButton(text="10", callback_data="levels:10"),
-            InlineKeyboardButton(text="15", callback_data="levels:15"),
+            InlineKeyboardButton(text="16", callback_data="levels:16"),
             InlineKeyboardButton(text="20", callback_data="levels:20")
         ],
         [
-            InlineKeyboardButton(text="✏️ Своё число", callback_data="levels:custom")
+            InlineKeyboardButton(text="✏️ Своё число (четное)", callback_data="levels:custom")
         ],
         [
             InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")
@@ -103,28 +103,23 @@ def get_grid_levels_keyboard() -> InlineKeyboardMarkup:
 
 
 def get_investment_keyboard(available_balance: float) -> InlineKeyboardMarkup:
-    """Get investment amount selection keyboard."""
-    suggestions = [
-        min(100, available_balance),
-        min(500, available_balance),
-        min(1000, available_balance)
-    ]
+    """Get investment amount selection keyboard for order size."""
+    # Suggest reasonable order sizes
+    suggestions = [5, 10, 20, 50]
 
     buttons = []
     for amount in suggestions:
-        if amount > 0:
-            buttons.append(
-                InlineKeyboardButton(
-                    text=f"${amount:.0f}",
-                    callback_data=f"investment:{amount}"
-                )
+        buttons.append(
+            InlineKeyboardButton(
+                text=f"${amount}",
+                callback_data=f"investment:{amount}"
             )
+        )
 
     return InlineKeyboardMarkup(inline_keyboard=[
         buttons,
         [
-            InlineKeyboardButton(text="✏️ Своя сумма", callback_data="investment:custom"),
-            InlineKeyboardButton(text="💯 Всё", callback_data=f"investment:{available_balance}")
+            InlineKeyboardButton(text="✏️ Своя сумма", callback_data="investment:custom")
         ],
         [
             InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")

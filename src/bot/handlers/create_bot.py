@@ -397,6 +397,10 @@ async def process_grid_levels(callback: CallbackQuery, state: FSMContext, db: As
             await callback.answer("❌ Количество уровней должно быть от 2 до 100")
             return
 
+        if grid_levels % 2 != 0:
+            await callback.answer("❌ Количество уровней должно быть четным числом")
+            return
+
         await state.update_data(grid_levels=grid_levels)
 
         # Get user and balance
@@ -413,10 +417,11 @@ async def process_grid_levels(callback: CallbackQuery, state: FSMContext, db: As
 
         data = await state.get_data()
         text = (
-            f"✅ Уровней сетки: {grid_levels}\n\n"
-            f"Шаг 5/5: Укажите сумму инвестиции (USDT)\n\n"
+            f"✅ Уровней сетки: {grid_levels} ({grid_levels//2} buy + {grid_levels//2} sell)\n\n"
+            f"Шаг 5/5: Укажите сумму одного ордера (USDT)\n\n"
             f"💼 Доступно: ${usdt_balance:.2f} USDT\n\n"
-            f"Эта сумма будет распределена по всем уровням сетки."
+            f"Каждый ордер (buy и sell) будет на эту сумму.\n"
+            f"Всего потребуется: ~${grid_levels * 10:.0f} USDT для {grid_levels} ордеров по $10"
         )
 
         await callback.message.edit_text(
@@ -448,6 +453,10 @@ async def process_custom_grid_levels(message: Message, state: FSMContext, db: As
             await message.answer("❌ Максимальное количество уровней: 100")
             return
 
+        if grid_levels % 2 != 0:
+            await message.answer("❌ Количество уровней должно быть четным числом (чтобы разделить поровну между buy и sell)")
+            return
+
         await state.update_data(grid_levels=grid_levels)
 
         # Get balance
@@ -463,9 +472,11 @@ async def process_custom_grid_levels(message: Message, state: FSMContext, db: As
         await state.set_state(CreateBotStates.waiting_for_investment)
 
         text = (
-            f"✅ Уровней сетки: {grid_levels}\n\n"
-            f"Шаг 5/5: Укажите сумму инвестиции (USDT)\n\n"
-            f"💼 Доступно: ${usdt_balance:.2f} USDT"
+            f"✅ Уровней сетки: {grid_levels} ({grid_levels//2} buy + {grid_levels//2} sell)\n\n"
+            f"Шаг 5/5: Укажите сумму одного ордера (USDT)\n\n"
+            f"💼 Доступно: ${usdt_balance:.2f} USDT\n\n"
+            f"Каждый ордер будет на эту сумму.\n"
+            f"Всего потребуется: ~${grid_levels * 10:.0f} USDT для {grid_levels} ордеров по $10"
         )
 
         await message.answer(
@@ -496,13 +507,23 @@ async def process_investment(callback: CallbackQuery, state: FSMContext, db: Asy
 
         investment = float(investment_value)
 
-        # Get user balance
+        # Get user and symbol data
         result = await db.execute(
             select(User).where(User.telegram_id == callback.from_user.id)
         )
         user = result.scalar_one_or_none()
 
+        data = await state.get_data()
+        symbol = data.get('symbol')
+
+        # Get exchange info to check minimum order cost
         mexc_service = MEXCService(db)
+        exchange_info = await mexc_service.get_exchange_info(symbol)
+        min_order_cost = float(exchange_info['min_order_cost'])
+
+        # Set minimum to exchange minimum or $2 as fallback
+        min_investment = max(min_order_cost, 2.0)
+
         balances = await mexc_service.get_balance(user.id)
         usdt_balance = balances.get('USDT', 0)
 
@@ -510,8 +531,8 @@ async def process_investment(callback: CallbackQuery, state: FSMContext, db: Asy
             await callback.answer(f"❌ Недостаточно средств. Доступно: ${usdt_balance:.2f}")
             return
 
-        if investment < 10:
-            await callback.answer("❌ Минимальная инвестиция: $10")
+        if investment < min_investment:
+            await callback.answer(f"❌ Минимальный размер ордера: ${min_investment:.2f}")
             return
 
         await state.update_data(investment_amount=investment)
@@ -519,13 +540,16 @@ async def process_investment(callback: CallbackQuery, state: FSMContext, db: Asy
 
         # Show confirmation
         data = await state.get_data()
+        grid_levels = data['grid_levels']
+        total_investment = investment * grid_levels
         text = (
             "📋 Подтверждение создания бота\n\n"
             f"📈 Пара: {data['display_symbol']}\n"
             f"💰 Текущая цена: ${data['current_price']:,.2f}\n"
             f"📊 Диапазон: ${data['lower_price']:,.2f} - ${data['upper_price']:,.2f}\n"
-            f"🔢 Уровней: {data['grid_levels']}\n"
-            f"💵 Инвестиция: ${investment:.2f} USDT\n\n"
+            f"🔢 Уровней: {grid_levels} ({grid_levels//2} buy + {grid_levels//2} sell)\n"
+            f"💵 Размер ордера: ${investment:.2f} USDT\n"
+            f"💰 Всего потребуется: ~${total_investment:.2f} USDT\n\n"
             f"⚠️ Убедитесь, что все параметры верны перед запуском."
         )
 
@@ -550,17 +574,27 @@ async def process_custom_investment(message: Message, state: FSMContext, db: Asy
             await message.answer("❌ Введите корректное число")
             return
 
-        if investment < 10:
-            await message.answer("❌ Минимальная инвестиция: $10")
-            return
-
-        # Get balance
+        # Get user and symbol data
         result = await db.execute(
             select(User).where(User.telegram_id == message.from_user.id)
         )
         user = result.scalar_one_or_none()
 
+        data = await state.get_data()
+        symbol = data.get('symbol')
+
+        # Get exchange info to check minimum order cost
         mexc_service = MEXCService(db)
+        exchange_info = await mexc_service.get_exchange_info(symbol)
+        min_order_cost = float(exchange_info['min_order_cost'])
+
+        # Set minimum to exchange minimum or $2 as fallback
+        min_investment = max(min_order_cost, 2.0)
+
+        if investment < min_investment:
+            await message.answer(f"❌ Минимальный размер ордера: ${min_investment:.2f}")
+            return
+
         balances = await mexc_service.get_balance(user.id)
         usdt_balance = balances.get('USDT', 0)
 
@@ -576,13 +610,16 @@ async def process_custom_investment(message: Message, state: FSMContext, db: Asy
 
         # Show confirmation
         data = await state.get_data()
+        grid_levels = data['grid_levels']
+        total_investment = investment * grid_levels
         text = (
             "📋 Подтверждение создания бота\n\n"
             f"📈 Пара: {data['display_symbol']}\n"
             f"💰 Текущая цена: ${data['current_price']:,.2f}\n"
             f"📊 Диапазон: ${data['lower_price']:,.2f} - ${data['upper_price']:,.2f}\n"
-            f"🔢 Уровней: {data['grid_levels']}\n"
-            f"💵 Инвестиция: ${investment:.2f} USDT\n\n"
+            f"🔢 Уровней: {grid_levels} ({grid_levels//2} buy + {grid_levels//2} sell)\n"
+            f"💵 Размер ордера: ${investment:.2f} USDT\n"
+            f"💰 Всего потребуется: ~${total_investment:.2f} USDT\n\n"
             f"⚠️ Убедитесь, что все параметры верны перед запуском."
         )
 
@@ -639,15 +676,19 @@ async def confirm_and_start_bot(callback: CallbackQuery, state: FSMContext, db: 
         )
 
         if grid_bot:
+            grid_levels = data['grid_levels']
+            order_size = data['investment_amount']
+            total_investment = order_size * grid_levels
             await callback.message.edit_text(
                 "✅ Grid бот успешно создан и запущен!\n\n"
                 f"🤖 Бот #{grid_bot.id}\n"
                 f"📈 {data['display_symbol']}\n"
-                f"💰 Инвестиция: ${data['investment_amount']:.2f}\n"
-                f"🔢 Уровней сетки: {data['grid_levels']}\n\n"
+                f"💵 Размер ордера: ${order_size:.2f}\n"
+                f"🔢 Уровней сетки: {grid_levels} ({grid_levels//2} buy + {grid_levels//2} sell)\n"
+                f"💰 Всего задействовано: ~${total_investment:.2f}\n\n"
                 f"📊 Режим: Neutral Grid\n"
-                f"• Buy ордера размещены ниже текущей цены\n"
-                f"• Sell ордера размещены выше текущей цены\n\n"
+                f"• {grid_levels//2} buy ордеров по ${order_size:.2f}\n"
+                f"• {grid_levels//2} sell ордеров по ${order_size:.2f}\n\n"
                 f"💡 Бот начнет зарабатывать когда цена будет двигаться в диапазоне сетки.\n\n"
                 f"Просмотреть статус: 📊 Мои боты",
                 reply_markup=get_back_button("main_menu")

@@ -75,7 +75,7 @@ class GridStrategy:
 
     @staticmethod
     def calculate_order_amounts(
-        investment_amount: Decimal,
+        order_size: Decimal,
         grid_levels: int,
         current_price: Decimal,
         price_levels: List[Decimal],
@@ -83,18 +83,18 @@ class GridStrategy:
         min_order_amount: Decimal = Decimal('0')
     ) -> Dict[int, Decimal]:
         """
-        Calculate order amounts for each grid level.
+        Calculate order amounts for each grid level based on fixed order size.
 
-        Algorithm:
-        1. Determine number of buy and sell orders relative to current_price
-        2. Divide investment_amount equally between orders
-        3. For buy orders: amount = (investment / num_buys) / price
-        4. For sell orders: amount = (investment / num_sells) / price
+        New Algorithm:
+        1. Each order (buy and sell) has the same size in quote currency (USDT)
+        2. For buy orders: amount = order_size / price
+        3. For sell orders: amount = order_size / price
+        4. Grid levels are split 50/50: half below current price, half above
         5. Ensure all amounts meet minimum order requirements
 
         Args:
-            investment_amount: Total investment amount
-            grid_levels: Number of grid levels
+            order_size: Size of each order in quote currency (USDT)
+            grid_levels: Number of grid levels (must be even)
             current_price: Current market price
             price_levels: List of grid price levels
             amount_precision: Precision for amounts
@@ -105,53 +105,72 @@ class GridStrategy:
         """
         amounts = {}
 
-        # Find current level index
-        current_level_idx = 0
-        for i, price in enumerate(price_levels):
-            if price >= current_price:
-                current_level_idx = i
-                break
+        # Grid levels are split evenly: half buy, half sell
+        # Price levels are arranged from low to high
+        # We want equal number of buy and sell orders
+        num_buy_levels = grid_levels // 2
+        num_sell_levels = grid_levels // 2
 
-        # Count buy and sell levels
-        num_buy_levels = current_level_idx
-        num_sell_levels = len(price_levels) - current_level_idx - 1
+        # Calculate amounts for buy orders (lower price levels)
+        for i in range(num_buy_levels):
+            price = price_levels[i]
+            # Each order should have the same USDT value (order_size)
+            amount = order_size / price
+            amount = round_down(amount, amount_precision)
 
-        # Calculate investment per side (50/50 split)
-        half_investment = investment_amount / Decimal('2')
+            # Ensure amount meets minimum requirement
+            if amount < min_order_amount:
+                amount = min_order_amount
 
-        # Calculate amounts for buy orders (below current price)
-        if num_buy_levels > 0:
-            for i in range(current_level_idx):
-                price = price_levels[i]
-                amount = (half_investment / Decimal(str(num_buy_levels))) / price
+            # Also ensure the order cost meets the order_size
+            # If amount * price < order_size, increase amount
+            order_cost = amount * price
+            if order_cost < order_size:
+                # Recalculate amount to meet exact order_size
+                amount = order_size / price
+                # Round up to next precision to ensure we meet minimum cost
                 amount = round_down(amount, amount_precision)
+                # Add one more unit of precision to be safe
+                precision_unit = Decimal('10') ** -int(amount_precision)
+                amount = amount + precision_unit
 
-                # Ensure amount meets minimum requirement
-                if amount < min_order_amount:
-                    logger.warning(
-                        f"Calculated amount {amount} is less than minimum {min_order_amount}, "
-                        f"using minimum amount"
-                    )
-                    amount = min_order_amount
+                logger.info(
+                    f"Adjusted amount to {amount} to meet order_size ${order_size} "
+                    f"at price ${price}"
+                )
 
-                amounts[i] = amount
+            amounts[i] = amount
 
-        # Calculate amounts for sell orders (above current price)
-        if num_sell_levels > 0:
-            for i in range(current_level_idx + 1, len(price_levels)):
-                price = price_levels[i]
-                amount = (half_investment / Decimal(str(num_sell_levels))) / price
+        # Calculate amounts for sell orders (higher price levels)
+        # Sell orders start from the middle of price_levels
+        for i in range(num_sell_levels):
+            level_idx = num_buy_levels + i
+            price = price_levels[level_idx]
+            # Each order should have the same USDT value (order_size)
+            amount = order_size / price
+            amount = round_down(amount, amount_precision)
+
+            # Ensure amount meets minimum requirement
+            if amount < min_order_amount:
+                amount = min_order_amount
+
+            # Also ensure the order cost meets the order_size
+            order_cost = amount * price
+            if order_cost < order_size:
+                # Recalculate amount to meet exact order_size
+                amount = order_size / price
+                # Round up to next precision to ensure we meet minimum cost
                 amount = round_down(amount, amount_precision)
+                # Add one more unit of precision to be safe
+                precision_unit = Decimal('10') ** -int(amount_precision)
+                amount = amount + precision_unit
 
-                # Ensure amount meets minimum requirement
-                if amount < min_order_amount:
-                    logger.warning(
-                        f"Calculated amount {amount} is less than minimum {min_order_amount}, "
-                        f"using minimum amount"
-                    )
-                    amount = min_order_amount
+                logger.info(
+                    f"Adjusted amount to {amount} to meet order_size ${order_size} "
+                    f"at price ${price}"
+                )
 
-                amounts[i] = amount
+            amounts[level_idx] = amount
 
         return amounts
 
@@ -218,9 +237,9 @@ class GridStrategy:
                 bot.grid_type
             )
 
-            # Calculate order amounts
+            # Calculate order amounts (bot.investment_amount now stores order_size)
             order_amounts = self.calculate_order_amounts(
-                bot.investment_amount,
+                bot.investment_amount,  # This is actually order_size now
                 bot.grid_levels,
                 current_price,
                 price_levels,
@@ -228,20 +247,16 @@ class GridStrategy:
                 min_order_amount
             )
 
-            # Find current level
-            current_level_idx = 0
-            for i, price in enumerate(price_levels):
-                if price >= current_price:
-                    current_level_idx = i
-                    break
-
             buy_orders = []
             sell_orders = []
             market_order = None
 
-            # Create BUY limit orders below current price
+            # Grid is split 50/50: first half are buy orders, second half are sell orders
+            num_buy_levels = bot.grid_levels // 2
+
+            # Create BUY limit orders (first half of price_levels - lower prices)
             for level_idx, amount in order_amounts.items():
-                if level_idx < current_level_idx:
+                if level_idx < num_buy_levels:
                     price = round_down(price_levels[level_idx], price_precision)
 
                     try:
@@ -277,23 +292,32 @@ class GridStrategy:
                         logger.error(f"Failed to create buy order at level {level_idx}: {e}")
                         # Continue with other orders
 
-            # Calculate total amount needed for sell orders
+            # Calculate total amount needed for sell orders (second half of levels)
             total_sell_amount = Decimal('0')
             for level_idx, amount in order_amounts.items():
-                if level_idx > current_level_idx:
+                if level_idx >= num_buy_levels:
                     total_sell_amount += amount
 
             # Buy base currency for sell orders if needed
             if total_sell_amount > 0:
                 try:
-                    # Add 1% buffer for safety
-                    buy_amount = total_sell_amount * Decimal('1.01')
+                    # Add 2% buffer for safety (to cover fees and slippage)
+                    buy_amount = total_sell_amount * Decimal('1.02')
                     buy_amount = round_down(buy_amount, amount_precision)
+
+                    # Ensure buy_amount is not zero
+                    if buy_amount < min_order_amount:
+                        buy_amount = min_order_amount
 
                     # For market buy, we need to pass cost in quote currency (USDT)
                     # MEXC requires cost = amount * price for market buy orders
                     cost = buy_amount * current_price
                     cost = round_down(cost, 2)  # USDT has 2 decimals precision
+
+                    # Ensure cost is positive
+                    if cost <= 0:
+                        logger.error(f"Calculated cost is {cost}, too small for market order")
+                        raise MEXCError("Order size too small")
 
                     logger.info(
                         f"Buying {buy_amount} {bot.symbol.split('/')[0]} for sell orders "
@@ -320,12 +344,10 @@ class GridStrategy:
                     logger.warning("Sell orders will not be created due to market buy failure")
                     total_sell_amount = Decimal('0')  # Skip sell order creation
 
-            # Create SELL limit orders above current price
-            # In Grid trading, we place sell orders above current price
-            # They will be filled when price goes up, then we create buy orders
+            # Create SELL limit orders (second half of price_levels - higher prices)
             if total_sell_amount > 0:
                 for level_idx, amount in order_amounts.items():
-                    if level_idx > current_level_idx:
+                    if level_idx >= num_buy_levels:
                         price = round_down(price_levels[level_idx], price_precision)
 
                         try:

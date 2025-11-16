@@ -286,6 +286,9 @@ async def stop_bot(callback: CallbackQuery, db: AsyncSession):
             await callback.answer("Бот не найден")
             return
 
+        # Answer callback immediately to avoid timeout
+        await callback.answer()
+
         # Show progress message
         await callback.message.edit_text(
             "⏳ Останавливаю бота...\n"
@@ -316,15 +319,20 @@ async def stop_bot(callback: CallbackQuery, db: AsyncSession):
                 reply_markup=get_back_button("my_bots")
             )
 
-        await callback.answer()
 
     except Exception as e:
         logger.error(f"Error stopping bot: {e}", exc_info=True)
-        await callback.message.edit_text(
-            "❌ Произошла ошибка при остановке бота",
-            reply_markup=get_back_button("my_bots")
-        )
-        await callback.answer()
+        try:
+            await callback.message.edit_text(
+                "❌ Произошла ошибка при остановке бота",
+                reply_markup=get_back_button("my_bots")
+            )
+        except Exception:
+            # If edit fails, send new message
+            await callback.message.answer(
+                "❌ Произошла ошибка при остановке бота",
+                reply_markup=get_back_button("my_bots")
+            )
 
 
 @router.callback_query(F.data.startswith("bot_delete:"))

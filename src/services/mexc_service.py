@@ -308,6 +308,7 @@ class MEXCService:
         Raises:
             MEXCError: If order creation fails
         """
+        exchange = None
         try:
             exchange = await self._get_exchange(user_id)
 
@@ -320,6 +321,9 @@ class MEXCService:
                 max_retries=2,
                 exceptions=(ccxt.NetworkError,)
             )
+
+            if not order:
+                raise MEXCError("Exchange returned empty response")
 
             return {
                 'order_id': str(order['id']),
@@ -348,6 +352,10 @@ class MEXCService:
         except Exception as e:
             logger.error(f"Error creating limit order: {e}")
             raise MEXCError(f"Ошибка создания ордера: {str(e)}")
+
+        finally:
+            if exchange:
+                await exchange.close()
 
     async def create_market_order(
         self,
@@ -390,6 +398,9 @@ class MEXCService:
                 exceptions=(ccxt.NetworkError,)
             )
 
+            if not order or not isinstance(order, dict):
+                raise MEXCError("Exchange returned invalid response")
+
             return {
                 'order_id': str(order['id']),
                 'status': order['status'],
@@ -404,6 +415,10 @@ class MEXCService:
         except ccxt.InsufficientFunds as e:
             logger.error(f"Insufficient funds for market order: {e}")
             raise MEXCError("Недостаточно средств")
+
+        except ccxt.InvalidOrder as e:
+            logger.error(f"Invalid market order: {e}")
+            raise MEXCError(f"Неверные параметры ордера: {str(e)}")
 
         except Exception as e:
             logger.error(f"Error creating market order: {e}")
@@ -517,6 +532,7 @@ class MEXCService:
         Raises:
             MEXCError: If API call fails
         """
+        exchange = None
         try:
             exchange = await self._get_exchange(user_id)
 
@@ -539,12 +555,16 @@ class MEXCService:
                     'remaining': parse_decimal(order.get('remaining', 0)),
                     'timestamp': order.get('timestamp'),
                 }
-                for order in orders
+                for order in orders if order
             ]
 
         except Exception as e:
             logger.error(f"Error getting open orders: {e}")
             raise MEXCError(f"Ошибка получения открытых ордеров: {str(e)}")
+
+        finally:
+            if exchange:
+                await exchange.close()
 
     async def close_all(self):
         """Close all exchange connections."""
