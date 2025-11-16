@@ -160,8 +160,8 @@ async def process_api_secret(message: Message, state: FSMContext, db: AsyncSessi
             return
 
         # Update user with encrypted keys
-        user.api_key = encrypted_key
-        user.api_secret = encrypted_secret
+        user.mexc_api_key = encrypted_key
+        user.mexc_api_secret = encrypted_secret
         await db.commit()
 
         await status_msg.edit_text(
