@@ -91,11 +91,10 @@ class BotManager:
             logger.info(f"Bot #{grid_bot.id} created successfully with {orders_created} orders")
 
             # Log bot creation
-            log = BotLog(
-                user_id=user_id,
+            log = BotLog.create_info(
+                message=f'Grid bot created: {symbol}, levels={grid_levels}, investment=${investment_amount}',
                 grid_bot_id=grid_bot.id,
-                event_type='bot_created',
-                message=f'Grid bot created: {symbol}, levels={grid_levels}, investment=${investment_amount}'
+                user_id=user_id
             )
             self.db.add(log)
             await self.db.commit()
