@@ -24,7 +24,7 @@ class APISetupStates(StatesGroup):
 
 
 @router.callback_query(F.data == "settings_api")
-async def show_api_settings(callback: CallbackQuery, db: AsyncSession):
+async def show_api_settings(callback: CallbackQuery, state: FSMContext, db: AsyncSession):
     """Show API settings."""
     try:
         # Get user
