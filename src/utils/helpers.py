@@ -42,6 +42,8 @@ def round_down(value: Decimal, precision: int) -> Decimal:
     Returns:
         Rounded value
     """
+    # Ensure precision is int (convert from float if needed)
+    precision = int(precision)
     quantize_value = Decimal(10) ** -precision
     return value.quantize(quantize_value, rounding=ROUND_DOWN)
 
