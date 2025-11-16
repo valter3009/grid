@@ -246,32 +246,41 @@ class GridStrategy:
                         # Continue with other orders
 
             # Buy asset at MARKET for sell orders
+            # For MEXC market buy with createMarketBuyOrderRequiresPrice: False,
+            # we need to pass the cost (in USDT) as the amount parameter
             half_investment = bot.investment_amount / Decimal('2')
-            market_buy_amount = half_investment / current_price
-            market_buy_amount = round_down(market_buy_amount, amount_precision)
+            market_buy_cost = round_down(half_investment, 2)  # Round to 2 decimals for USDT
+
+            # Expected coins to receive (for logging)
+            expected_coins = market_buy_cost / current_price
 
             try:
                 market_order = await self.mexc.create_market_order(
                     user_id=bot.user_id,
                     symbol=bot.symbol,
                     side='buy',
-                    amount=market_buy_amount
+                    amount=market_buy_cost,  # Pass cost in USDT for market buy
+                    price=current_price
                 )
+
+                # Get actual amount filled from order
+                actual_coins = market_order.get('filled', expected_coins)
 
                 # Log market order
                 log_entry = BotLog.create_info(
-                    message=f"Market buy: {market_buy_amount} @ ~{current_price}",
+                    message=f"Market buy: ~{actual_coins} coins for ${market_buy_cost}",
                     grid_bot_id=grid_bot_id,
                     user_id=bot.user_id,
                     details={
                         'order_id': market_order['order_id'],
-                        'amount': str(market_buy_amount),
+                        'cost_usdt': str(market_buy_cost),
+                        'coins_received': str(actual_coins),
                         'average_price': str(market_order.get('average_price', current_price))
                     }
                 )
                 self.db.add(log_entry)
 
-                logger.info(f"Market buy executed: {market_buy_amount}")
+                logger.info(f"Market buy executed: ~{actual_coins} coins for ${market_buy_cost}")
 
             except MEXCError as e:
                 logger.error(f"Failed to create market buy order: {e}")
