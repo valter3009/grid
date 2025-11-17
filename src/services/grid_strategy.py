@@ -514,6 +514,21 @@ class GridStrategy:
                 if amount < min_order_amount:
                     amount = min_order_amount
 
+                # CRITICAL FIX: Ensure order cost meets order_size after rounding
+                order_cost = amount * price
+                if order_cost < bot.order_size:
+                    # Recalculate to meet exact order_size
+                    amount = bot.order_size / price
+                    amount = round_down(amount, amount_precision)
+                    # Add one precision unit to ensure we meet minimum cost
+                    precision_unit = Decimal('10') ** -int(amount_precision)
+                    amount = amount + precision_unit
+
+                    logger.debug(
+                        f"Adjusted buy amount to {amount} to meet order_size "
+                        f"${bot.order_size} at price ${price}"
+                    )
+
                 try:
                     order = await self.mexc.create_limit_order(
                         user_id=bot.user_id,
@@ -568,9 +583,14 @@ class GridStrategy:
                     if buy_amount < min_order_amount:
                         buy_amount = min_order_amount
 
-                    # For market buy, we need to pass cost in quote currency (USDT)
+                    # For market buy, we need to pass cost in quote currency
                     cost = buy_amount * starting_price
-                    cost = round_down(cost, 2)  # USDT has 2 decimals precision
+
+                    # Get quote currency precision (USDT/USDC = 2, BTC = 8, etc)
+                    quote_currency = bot.symbol.split('/')[1] if '/' in bot.symbol else 'USDT'
+                    # Most stablecoins use 2 decimals, others use 8
+                    quote_precision = 2 if quote_currency in ['USDT', 'USDC', 'BUSD', 'DAI'] else 8
+                    cost = round_down(cost, quote_precision)
 
                     # Ensure cost is positive
                     if cost <= 0:
@@ -579,15 +599,15 @@ class GridStrategy:
 
                     logger.info(
                         f"Buying {buy_amount} {bot.symbol.split('/')[0]} for sell orders "
-                        f"(cost: ${cost}, needed: {total_sell_amount})"
+                        f"(cost: ${cost} {quote_currency}, needed: {total_sell_amount})"
                     )
 
-                    # Buy base currency at market price (pass cost, not amount)
+                    # Buy base currency at market price (pass cost in quote currency)
                     market_order = await self.mexc.create_market_order(
                         user_id=bot.user_id,
                         symbol=bot.symbol,
                         side='buy',
-                        amount=cost  # Pass cost in USDT for market buy
+                        amount=cost  # Pass cost in quote currency for market buy
                     )
 
                     logger.info(
@@ -615,6 +635,21 @@ class GridStrategy:
                     # Ensure amount meets minimum requirement
                     if amount < min_order_amount:
                         amount = min_order_amount
+
+                    # CRITICAL FIX: Ensure order cost meets order_size after rounding
+                    order_cost = amount * price
+                    if order_cost < bot.order_size:
+                        # Recalculate to meet exact order_size
+                        amount = bot.order_size / price
+                        amount = round_down(amount, amount_precision)
+                        # Add one precision unit to ensure we meet minimum cost
+                        precision_unit = Decimal('10') ** -int(amount_precision)
+                        amount = amount + precision_unit
+
+                        logger.debug(
+                            f"Adjusted sell amount to {amount} to meet order_size "
+                            f"${bot.order_size} at price ${price}"
+                        )
 
                     try:
                         order = await self.mexc.create_limit_order(
@@ -746,6 +781,16 @@ class GridStrategy:
                 if sell_amount < min_order_amount:
                     sell_amount = min_order_amount
 
+                # CRITICAL FIX: Ensure order cost meets order_size after rounding
+                order_cost = sell_amount * sell_price
+                if order_cost < bot.order_size:
+                    # Recalculate to meet exact order_size
+                    sell_amount = bot.order_size / sell_price
+                    sell_amount = round_down(sell_amount, amount_precision)
+                    # Add one precision unit to ensure we meet minimum cost
+                    precision_unit = Decimal('10') ** -int(amount_precision)
+                    sell_amount = sell_amount + precision_unit
+
                 try:
                     # Create sell order
                     mexc_order = await self.mexc.create_limit_order(
@@ -798,6 +843,16 @@ class GridStrategy:
                     # Ensure amount meets minimum requirement
                     if buy_amount < min_order_amount:
                         buy_amount = min_order_amount
+
+                    # CRITICAL FIX: Ensure order cost meets order_size after rounding
+                    order_cost = buy_amount * buy_price
+                    if order_cost < bot.order_size:
+                        # Recalculate to meet exact order_size
+                        buy_amount = bot.order_size / buy_price
+                        buy_amount = round_down(buy_amount, amount_precision)
+                        # Add one precision unit to ensure we meet minimum cost
+                        precision_unit = Decimal('10') ** -int(amount_precision)
+                        buy_amount = buy_amount + precision_unit
 
                     try:
                         # Create buy order
