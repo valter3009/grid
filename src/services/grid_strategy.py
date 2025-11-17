@@ -95,32 +95,41 @@ def calculate_order_amount_for_cost(
     logger.info(f"[ORDER_SIZE_CALC] Precision step: {precision_step}")
 
     # Start with ideal amount rounded down
-    amount = round_down(ideal_amount, amount_precision)
-    cost = amount * price
+    amount_low = round_down(ideal_amount, amount_precision)
+    cost_low = amount_low * price
 
-    logger.info(f"[ORDER_SIZE_CALC] After round_down: amount={amount}, cost={cost} USDT")
+    logger.info(f"[ORDER_SIZE_CALC] After round_down: amount={amount_low}, cost={cost_low} USDT")
 
-    # CRITICAL: Increase amount until cost >= order_size
+    # Calculate amount rounded up (add one precision step)
+    amount_high = amount_low + precision_step
+    cost_high = amount_high * price
+
+    logger.info(f"[ORDER_SIZE_CALC] Rounded up option: amount={amount_high}, cost={cost_high} USDT")
+
+    # CRITICAL: Choose amount that gives cost CLOSEST to order_size
     # This ensures consistent cost in quote currency across all orders
-    max_iterations = 100  # Safety check
-    iterations = 0
+    diff_low = abs(cost_low - order_size)
+    diff_high = abs(cost_high - order_size)
 
-    while cost < order_size and iterations < max_iterations:
-        amount += precision_step
-        cost = amount * price
-        iterations += 1
-        logger.debug(f"[ORDER_SIZE_CALC] Iteration {iterations}: amount={amount}, cost={cost} USDT")
+    if diff_low <= diff_high:
+        # Rounded down is closer to target
+        amount = amount_low
+        cost = cost_low
+        logger.info(f"[ORDER_SIZE_CALC] Choosing LOWER: diff_low={diff_low} <= diff_high={diff_high}")
+    else:
+        # Rounded up is closer to target
+        amount = amount_high
+        cost = cost_high
+        logger.info(f"[ORDER_SIZE_CALC] Choosing HIGHER: diff_high={diff_high} < diff_low={diff_low}")
 
-    logger.info(f"[ORDER_SIZE_CALC] After adjustment: amount={amount}, cost={cost} USDT (iterations: {iterations})")
-
-    # Check minimum AFTER adjustment (but recalculate cost if we had to increase)
+    # Check minimum AFTER choosing best amount
     if amount < min_order_amount:
         logger.warning(f"[ORDER_SIZE_CALC] Amount {amount} < min {min_order_amount}, using minimum")
         amount = min_order_amount
         cost = amount * price
         logger.info(f"[ORDER_SIZE_CALC] Final after min check: amount={amount}, cost={cost} USDT")
 
-    logger.info(f"[ORDER_SIZE_CALC] FINAL: {amount} @ {price} = {cost} USDT (target was {order_size} USDT)")
+    logger.info(f"[ORDER_SIZE_CALC] FINAL: {amount} @ {price} = {cost} USDT (target was {order_size} USDT, diff={abs(cost - order_size)})")
 
     return amount
 
