@@ -17,10 +17,34 @@ from src.bot.keyboards.inline import (
     get_trading_pairs_keyboard,
     get_back_button
 )
+from src.utils.helpers import split_symbol
 
 logger = logging.getLogger(__name__)
 
 router = Router()
+
+
+# Helper functions
+def get_quote_currency(symbol: str) -> str:
+    """Extract quote currency from trading pair (e.g., BTC/USDT -> USDT)."""
+    try:
+        _, quote = split_symbol(symbol)
+        return quote
+    except:
+        return 'USDT'  # Default fallback
+
+
+def format_currency(value: float, currency: str) -> str:
+    """Format currency value based on currency type."""
+    stablecoins = ['USDT', 'USDC', 'BUSD', 'DAI', 'TUSD', 'USDD', 'FDUSD']
+
+    if currency in stablecoins:
+        # Stablecoins: 2 decimals
+        return f"{value:,.2f}"
+    else:
+        # Crypto: up to 8 decimals, trim trailing zeros
+        formatted = f"{value:.8f}".rstrip('0').rstrip('.')
+        return formatted
 
 
 # Инструкции для каждого параметра
@@ -77,11 +101,11 @@ INSTRUCTIONS = {
     ),
     "order_size": (
         "💵 <b>Размер одного ордера</b>\n\n"
-        "Сумма в USDT для каждого ордера (buy и sell).\n"
+        "Сумма в котируемой валюте для каждого ордера (buy и sell).\n"
         "Все ордера будут одинакового размера.\n\n"
         "Минимум: обычно $5-10 в зависимости от биржи\n"
         "Рекомендация: $10-50 для начала\n\n"
-        "Введите размер ордера в USDT (например: 10):"
+        "Введите размер ордера (например: 10):"
     )
 }
 
@@ -171,7 +195,7 @@ async def process_pair_selection(callback: CallbackQuery, state: FSMContext, db:
                 "✏️ Введите торговую пару\n\n"
                 "Формат: BTC/USDT\n"
                 "Убедитесь, что пара существует на MEXC.",
-                reply_markup=get_back_button("cancel")
+                reply_markup=get_back_button("back_to_config")
             )
             await state.set_state(CreateGridBot.waiting_for_custom_pair)
             await callback.answer()
@@ -268,15 +292,35 @@ async def config_spread(callback: CallbackQuery, state: FSMContext):
     """Configure flat spread."""
     data = await state.get_data()
     current_price = data.get("current_price", 0)
+    pair = data.get("pair", "")
 
-    text = INSTRUCTIONS["flat_spread"]
-    if current_price > 0:
+    # Get quote currency for formatting
+    quote_currency = get_quote_currency(pair) if pair else 'USDT'
+
+    # Use dynamic example if pair is selected
+    if current_price > 0 and pair:
         recommended = current_price * 0.02  # 2% от текущей цены
-        text += f"\n💡 Для текущей цены рекомендуется: ${recommended:,.0f}"
+        buy_price = current_price - recommended
+        sell_price = current_price + recommended
+
+        text = (
+            "💰 <b>Спред между Buy и Sell ордерами</b>\n\n"
+            "Это разница в цене между buy и sell ордерами на одном уровне.\n"
+            "Определяет вашу минимальную прибыль с одного цикла.\n\n"
+            f"Пример для {pair}:\n"
+            f"• Текущая цена: ${format_currency(current_price, quote_currency)}\n"
+            f"• При спреде ${format_currency(recommended, quote_currency)}:\n"
+            f"  - Buy ордер на ${format_currency(buy_price, quote_currency)}\n"
+            f"  - Sell ордер на ${format_currency(sell_price, quote_currency)}\n\n"
+            "Рекомендация: 1-3% от текущей цены\n\n"
+            "Введите спред в долларах:"
+        )
+    else:
+        text = INSTRUCTIONS["flat_spread"]
 
     await callback.message.edit_text(
         text,
-        reply_markup=get_back_button("cancel"),
+        reply_markup=get_back_button("back_to_config"),
         parse_mode="HTML"
     )
     await state.set_state(CreateGridBot.waiting_for_spread)
@@ -324,15 +368,37 @@ async def config_increment(callback: CallbackQuery, state: FSMContext):
     """Configure flat increment."""
     data = await state.get_data()
     current_price = data.get("current_price", 0)
+    pair = data.get("pair", "")
 
-    text = INSTRUCTIONS["flat_increment"]
-    if current_price > 0:
+    # Get quote currency for formatting
+    quote_currency = get_quote_currency(pair) if pair else 'USDT'
+
+    # Use dynamic example if pair is selected
+    if current_price > 0 and pair:
         recommended = current_price * 0.01  # 1% от текущей цены
-        text += f"\n💡 Для текущей цены рекомендуется: ${recommended:,.0f}"
+        buy1 = current_price - recommended
+        buy2 = current_price - (recommended * 2)
+        buy3 = current_price - (recommended * 3)
+
+        text = (
+            "📊 <b>Шаг между уровнями сетки</b>\n\n"
+            "Расстояние между соседними ордерами.\n"
+            "Чем меньше шаг, тем плотнее сетка.\n\n"
+            f"Пример для {pair}:\n"
+            f"• Текущая цена: ${format_currency(current_price, quote_currency)}\n"
+            f"• При шаге ${format_currency(recommended, quote_currency)}:\n"
+            f"  - Buy 1 на ${format_currency(buy1, quote_currency)}\n"
+            f"  - Buy 2 на ${format_currency(buy2, quote_currency)}\n"
+            f"  - Buy 3 на ${format_currency(buy3, quote_currency)}\n\n"
+            "Рекомендация: 0.5-2% от текущей цены\n\n"
+            "Введите шаг в долларах:"
+        )
+    else:
+        text = INSTRUCTIONS["flat_increment"]
 
     await callback.message.edit_text(
         text,
-        reply_markup=get_back_button("cancel"),
+        reply_markup=get_back_button("back_to_config"),
         parse_mode="HTML"
     )
     await state.set_state(CreateGridBot.waiting_for_increment)
@@ -380,7 +446,7 @@ async def config_buy_orders(callback: CallbackQuery, state: FSMContext):
     """Configure buy orders count."""
     await callback.message.edit_text(
         INSTRUCTIONS["buy_orders_count"],
-        reply_markup=get_back_button("cancel"),
+        reply_markup=get_back_button("back_to_config"),
         parse_mode="HTML"
     )
     await state.set_state(CreateGridBot.waiting_for_buy_orders)
@@ -432,7 +498,7 @@ async def config_sell_orders(callback: CallbackQuery, state: FSMContext):
     """Configure sell orders count."""
     await callback.message.edit_text(
         INSTRUCTIONS["sell_orders_count"],
-        reply_markup=get_back_button("cancel"),
+        reply_markup=get_back_button("back_to_config"),
         parse_mode="HTML"
     )
     await state.set_state(CreateGridBot.waiting_for_sell_orders)
@@ -491,7 +557,7 @@ async def config_starting_price(callback: CallbackQuery, state: FSMContext):
 
     await callback.message.edit_text(
         text,
-        reply_markup=get_back_button("cancel"),
+        reply_markup=get_back_button("back_to_config"),
         parse_mode="HTML"
     )
     await state.set_state(CreateGridBot.waiting_for_starting_price)
@@ -544,16 +610,22 @@ async def config_order_size(callback: CallbackQuery, state: FSMContext, db: Asyn
     )
     user = result.scalar_one_or_none()
 
+    # Get quote currency from selected pair
+    data = await state.get_data()
+    quote_currency = 'USDT'  # Default
+    if 'pair' in data:
+        quote_currency = get_quote_currency(data['pair'])
+
     mexc_service = MEXCService(db)
     balances = await mexc_service.get_balance(user.id)
-    usdt_balance = balances.get('USDT', 0)
+    balance = balances.get(quote_currency, 0)
 
     text = INSTRUCTIONS["order_size"]
-    text += f"\n💼 Доступно на балансе: ${usdt_balance:,.2f} USDT"
+    text += f"\n💼 Доступно на балансе: {format_currency(float(balance), quote_currency)} {quote_currency}"
 
     await callback.message.edit_text(
         text,
-        reply_markup=get_back_button("cancel"),
+        reply_markup=get_back_button("back_to_config"),
         parse_mode="HTML"
     )
     await state.set_state(CreateGridBot.waiting_for_order_size)
@@ -621,19 +693,22 @@ async def create_bot(callback: CallbackQuery, state: FSMContext, db: AsyncSessio
         buy_count = data["buy_orders_count"]
         sell_count = data["sell_orders_count"]
         order_size = data["order_size"]
+        pair = data["pair"]
+
+        # Extract quote currency from pair
+        quote_currency = get_quote_currency(pair)
 
         # For flat grid:
-        # - Need USDT for buy orders: buy_count * order_size
+        # - Need quote currency for buy orders: buy_count * order_size
         # - Need to buy base currency for sell orders: sell_count * order_size
         total_required = (buy_count + sell_count) * order_size
 
         # Check balance
         mexc_service = MEXCService(db)
         balances = await mexc_service.get_balance(user.id)
-        usdt_balance = balances.get('USDT', 0)
+        quote_balance = balances.get(quote_currency, 0)
 
         # Show confirmation with balance check
-        pair = data["pair"]
         spread = data["flat_spread"]
         increment = data["flat_increment"]
         starting_price = data["starting_price"]
@@ -649,28 +724,28 @@ async def create_bot(callback: CallbackQuery, state: FSMContext, db: AsyncSessio
         text = (
             "📋 <b>Подтверждение создания бота</b>\n\n"
             f"📈 Пара: {pair}\n"
-            f"💰 Текущая цена: ${current_price:,.2f}\n"
-            f"🎯 Начальная цена: ${starting_price:,.2f}\n\n"
+            f"💰 Текущая цена: ${format_currency(current_price, quote_currency)}\n"
+            f"🎯 Начальная цена: ${format_currency(starting_price, quote_currency)}\n\n"
             f"📊 Параметры сетки:\n"
-            f"• Спред: ${spread:,.0f}\n"
-            f"• Шаг сетки: ${increment:,.0f}\n"
+            f"• Спред: ${format_currency(spread, quote_currency)}\n"
+            f"• Шаг сетки: ${format_currency(increment, quote_currency)}\n"
             f"• Buy ордеров: {buy_count} шт\n"
             f"• Sell ордеров: {sell_count} шт\n"
-            f"• Размер ордера: ${order_size:,.2f}\n\n"
+            f"• Размер ордера: ${format_currency(order_size, quote_currency)}\n\n"
             f"📉 Диапазон цен:\n"
-            f"• Самый низкий buy: ${lowest_buy:,.2f}\n"
-            f"• Самый высокий sell: ${highest_sell:,.2f}\n\n"
+            f"• Самый низкий buy: ${format_currency(lowest_buy, quote_currency)}\n"
+            f"• Самый высокий sell: ${format_currency(highest_sell, quote_currency)}\n\n"
             f"💵 <b>Требуется средств:</b>\n"
-            f"• Buy ордера: {buy_count} × ${order_size:,.2f} = ${buy_count * order_size:,.2f}\n"
-            f"• Sell ордера: {sell_count} × ${order_size:,.2f} = ${sell_count * order_size:,.2f}\n"
-            f"• <b>Всего: ${total_required:,.2f} USDT</b>\n\n"
-            f"💼 Доступно: ${usdt_balance:,.2f} USDT\n"
+            f"• Buy ордера: {buy_count} × ${format_currency(order_size, quote_currency)} = ${format_currency(buy_count * order_size, quote_currency)}\n"
+            f"• Sell ордера: {sell_count} × ${format_currency(order_size, quote_currency)} = ${format_currency(sell_count * order_size, quote_currency)}\n"
+            f"• <b>Всего: ${format_currency(total_required, quote_currency)} {quote_currency}</b>\n\n"
+            f"💼 Доступно: ${format_currency(float(quote_balance), quote_currency)} {quote_currency}\n"
         )
 
-        if usdt_balance < total_required:
+        if quote_balance < total_required:
             text += (
                 f"\n❌ <b>Недостаточно средств!</b>\n"
-                f"Не хватает: ${total_required - usdt_balance:,.2f} USDT\n\n"
+                f"Не хватает: ${format_currency(total_required - float(quote_balance), quote_currency)} {quote_currency}\n\n"
                 f"Пополните баланс или уменьшите параметры бота."
             )
             await callback.message.edit_text(
@@ -828,7 +903,29 @@ async def confirm_create_flat(callback: CallbackQuery, state: FSMContext, db: As
         await state.clear()
 
 
-# === ОТМЕНА ===
+# === НАЗАД И ОТМЕНА ===
+
+@router.callback_query(F.data == "back_to_config")
+async def back_to_config_menu(callback: CallbackQuery, state: FSMContext):
+    """Return to configuration menu without resetting settings."""
+    # Get current config
+    data = await state.get_data()
+
+    # Return to configuring state
+    await state.set_state(CreateGridBot.configuring)
+
+    text = (
+        "➕ <b>Создание Grid бота</b>\n\n"
+        "Настройте параметры бота:"
+    )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_grid_config_keyboard(data),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
 
 @router.callback_query(F.data == "cancel")
 async def cancel_creation(callback: CallbackQuery, state: FSMContext):
