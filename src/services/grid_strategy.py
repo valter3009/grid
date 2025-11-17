@@ -82,20 +82,26 @@ def calculate_order_amount_for_cost(
         After adjustment = 0.039 SOL → cost = 5.07 USDT ✓
     """
     # Calculate ideal amount
-    amount = order_size / price
+    ideal_amount = order_size / price
 
-    # Round down to exchange precision
-    amount = round_down(amount, amount_precision)
+    logger.info(f"[ORDER_SIZE_CALC] Target: {order_size} USDT @ {price} = ideal amount {ideal_amount}")
 
-    # Determine precision step
+    # Determine precision step FIRST
     if isinstance(amount_precision, (float, Decimal)):
         precision_step = Decimal(str(amount_precision))
     else:
         precision_step = Decimal('10') ** -int(amount_precision)
 
+    logger.info(f"[ORDER_SIZE_CALC] Precision step: {precision_step}")
+
+    # Start with ideal amount rounded down
+    amount = round_down(ideal_amount, amount_precision)
+    cost = amount * price
+
+    logger.info(f"[ORDER_SIZE_CALC] After round_down: amount={amount}, cost={cost} USDT")
+
     # CRITICAL: Increase amount until cost >= order_size
     # This ensures consistent cost in quote currency across all orders
-    cost = amount * price
     max_iterations = 100  # Safety check
     iterations = 0
 
@@ -103,10 +109,18 @@ def calculate_order_amount_for_cost(
         amount += precision_step
         cost = amount * price
         iterations += 1
+        logger.debug(f"[ORDER_SIZE_CALC] Iteration {iterations}: amount={amount}, cost={cost} USDT")
 
-    # Ensure amount meets exchange minimum requirement
+    logger.info(f"[ORDER_SIZE_CALC] After adjustment: amount={amount}, cost={cost} USDT (iterations: {iterations})")
+
+    # Check minimum AFTER adjustment (but recalculate cost if we had to increase)
     if amount < min_order_amount:
+        logger.warning(f"[ORDER_SIZE_CALC] Amount {amount} < min {min_order_amount}, using minimum")
         amount = min_order_amount
+        cost = amount * price
+        logger.info(f"[ORDER_SIZE_CALC] Final after min check: amount={amount}, cost={cost} USDT")
+
+    logger.info(f"[ORDER_SIZE_CALC] FINAL: {amount} @ {price} = {cost} USDT (target was {order_size} USDT)")
 
     return amount
 
