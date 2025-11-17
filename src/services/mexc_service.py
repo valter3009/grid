@@ -325,13 +325,16 @@ class MEXCService:
             if not order:
                 raise MEXCError("Exchange returned empty response")
 
+            # Handle fee field safely (can be None or dict)
+            fee_data = order.get('fee') or {}
+
             return {
                 'order_id': str(order['id']),
                 'status': order['status'],
                 'filled': parse_decimal(order.get('filled', 0)),
                 'remaining': parse_decimal(order.get('remaining', amount)),
-                'fee': parse_decimal(order.get('fee', {}).get('cost', 0)),
-                'fee_currency': order.get('fee', {}).get('currency', 'USDT'),
+                'fee': parse_decimal(fee_data.get('cost', 0)),
+                'fee_currency': fee_data.get('currency', 'USDT'),
                 'timestamp': order.get('timestamp'),
                 'price': parse_decimal(order.get('price', price)),
                 'amount': parse_decimal(order.get('amount', amount)),
@@ -401,13 +404,16 @@ class MEXCService:
             if not order or not isinstance(order, dict):
                 raise MEXCError("Exchange returned invalid response")
 
+            # Handle fee field safely (can be None or dict)
+            fee_data = order.get('fee') or {}
+
             return {
                 'order_id': str(order['id']),
                 'status': order['status'],
                 'filled': parse_decimal(order.get('filled', 0)),
                 'average_price': parse_decimal(order.get('average', 0)),
-                'fee': parse_decimal(order.get('fee', {}).get('cost', 0)),
-                'fee_currency': order.get('fee', {}).get('currency', 'USDT'),
+                'fee': parse_decimal(fee_data.get('cost', 0)),
+                'fee_currency': fee_data.get('currency', 'USDT'),
                 'timestamp': order.get('timestamp'),
                 'amount': parse_decimal(order.get('amount', amount)),
             }
@@ -496,6 +502,9 @@ class MEXCService:
                 exceptions=(ccxt.NetworkError,)
             )
 
+            # Handle fee field safely (can be None or dict)
+            fee_data = order.get('fee') or {}
+
             return {
                 'order_id': str(order['id']),
                 'status': order['status'],
@@ -504,8 +513,8 @@ class MEXCService:
                 'amount': parse_decimal(order.get('amount', 0)),
                 'filled': parse_decimal(order.get('filled', 0)),
                 'remaining': parse_decimal(order.get('remaining', 0)),
-                'fee': parse_decimal(order.get('fee', {}).get('cost', 0)),
-                'fee_currency': order.get('fee', {}).get('currency'),
+                'fee': parse_decimal(fee_data.get('cost', 0)),
+                'fee_currency': fee_data.get('currency'),
                 'timestamp': order.get('timestamp'),
                 'average_price': parse_decimal(order.get('average', 0)),
             }
