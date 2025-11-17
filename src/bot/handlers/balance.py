@@ -65,6 +65,9 @@ def format_amount(value: float, currency: str) -> str:
 @router.callback_query(F.data == "balance")
 async def show_balance(callback: CallbackQuery, db: AsyncSession):
     """Show user balance."""
+    # Answer callback immediately to avoid timeout
+    await callback.answer()
+
     try:
         # Get user
         result = await db.execute(
@@ -73,7 +76,10 @@ async def show_balance(callback: CallbackQuery, db: AsyncSession):
         user = result.scalar_one_or_none()
 
         if not user:
-            await callback.answer("Пожалуйста, отправьте /start")
+            await callback.message.edit_text(
+                "Пожалуйста, отправьте /start",
+                reply_markup=get_back_button("main_menu")
+            )
             return
 
         if not user.has_api_keys:
@@ -83,7 +89,6 @@ async def show_balance(callback: CallbackQuery, db: AsyncSession):
                 "Перейдите в ⚙️ Настройки → 🔑 API ключи",
                 reply_markup=get_back_button("main_menu")
             )
-            await callback.answer()
             return
 
         # Show loading message immediately
@@ -92,7 +97,6 @@ async def show_balance(callback: CallbackQuery, db: AsyncSession):
             "Это может занять несколько секунд.",
             reply_markup=None
         )
-        await callback.answer()
 
         # Get balance from MEXC
         mexc_service = MEXCService(db)
@@ -104,7 +108,6 @@ async def show_balance(callback: CallbackQuery, db: AsyncSession):
                 "Проверьте настройки API ключей.",
                 reply_markup=get_back_button("main_menu")
             )
-            await callback.answer()
             return
 
         # Filter out zero balances
@@ -120,26 +123,40 @@ async def show_balance(callback: CallbackQuery, db: AsyncSession):
                 "Пополните счет на MEXC для начала торговли."
             )
         else:
-            # Get USD prices for all assets
-            assets_with_usd = []
-            total_usd = Decimal('0')
+            # Get USD prices for all assets in parallel
+            import asyncio
 
-            for symbol, amount in non_zero_balances.items():
+            async def get_asset_info(symbol: str, amount: Decimal) -> dict:
+                """Get asset info with USD price."""
                 usd_price = await get_usd_price(mexc_service, symbol)
                 usd_value = Decimal(str(amount)) * usd_price
-                total_usd += usd_value
-
-                assets_with_usd.append({
+                return {
                     'symbol': symbol,
                     'amount': amount,
                     'usd_value': float(usd_value)
-                })
+                }
+
+            # Fetch all prices in parallel (much faster!)
+            tasks = [
+                get_asset_info(symbol, amount)
+                for symbol, amount in non_zero_balances.items()
+            ]
+            assets_with_usd = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Filter out any errors
+            assets_with_usd = [
+                asset for asset in assets_with_usd
+                if not isinstance(asset, Exception)
+            ]
+
+            # Calculate total
+            total_usd = sum(asset['usd_value'] for asset in assets_with_usd)
 
             # Sort by USD value (highest first)
             assets_with_usd.sort(key=lambda x: x['usd_value'], reverse=True)
 
             # Build message
-            text = f"💼 Баланс: ${format_usd(float(total_usd))}\n\n"
+            text = f"💼 Баланс: ${format_usd(total_usd)}\n\n"
             text += "Активы:\n"
 
             for asset in assets_with_usd:
@@ -152,13 +169,12 @@ async def show_balance(callback: CallbackQuery, db: AsyncSession):
 
                 text += f"• {symbol}: {formatted_amount} (${formatted_usd})\n"
 
-            text += f"\n📊 Всего активов: {len(non_zero_balances)}"
+            text += f"\n📊 Всего активов: {len(assets_with_usd)}"
 
         await callback.message.edit_text(
             text,
             reply_markup=get_back_button("main_menu")
         )
-        await callback.answer()
 
         logger.info(f"User {user.telegram_id} viewed balance")
 
@@ -169,4 +185,3 @@ async def show_balance(callback: CallbackQuery, db: AsyncSession):
             "Попробуйте позже.",
             reply_markup=get_back_button("main_menu")
         )
-        await callback.answer()
