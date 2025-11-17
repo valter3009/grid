@@ -544,12 +544,19 @@ async def config_order_size(callback: CallbackQuery, state: FSMContext, db: Asyn
     )
     user = result.scalar_one_or_none()
 
+    # Get configured pair to show balance in correct currency
+    data = await state.get_data()
+    quote_currency = "USDT"  # Default
+    if data.get("pair"):
+        # Extract quote currency from pair (e.g., BTC/USDT → USDT)
+        quote_currency = data["pair"].split("/")[1] if "/" in data["pair"] else "USDT"
+
     mexc_service = MEXCService(db)
     balances = await mexc_service.get_balance(user.id)
-    usdt_balance = balances.get('USDT', 0)
+    quote_balance = balances.get(quote_currency, 0)
 
     text = INSTRUCTIONS["order_size"]
-    text += f"\n💼 Доступно на балансе: ${usdt_balance:,.2f} USDT"
+    text += f"\n💼 Доступно на балансе: ${quote_balance:,.2f} {quote_currency}"
 
     await callback.message.edit_text(
         text,
@@ -621,19 +628,22 @@ async def create_bot(callback: CallbackQuery, state: FSMContext, db: AsyncSessio
         buy_count = data["buy_orders_count"]
         sell_count = data["sell_orders_count"]
         order_size = data["order_size"]
+        pair = data["pair"]
+
+        # Extract quote currency from pair (e.g., BTC/USDT → USDT, BTC/USDC → USDC)
+        quote_currency = pair.split("/")[1] if "/" in pair else "USDT"
 
         # For flat grid:
-        # - Need USDT for buy orders: buy_count * order_size
+        # - Need quote currency for buy orders: buy_count * order_size
         # - Need to buy base currency for sell orders: sell_count * order_size
         total_required = (buy_count + sell_count) * order_size
 
         # Check balance
         mexc_service = MEXCService(db)
         balances = await mexc_service.get_balance(user.id)
-        usdt_balance = balances.get('USDT', 0)
+        quote_balance = balances.get(quote_currency, 0)
 
         # Show confirmation with balance check
-        pair = data["pair"]
         spread = data["flat_spread"]
         increment = data["flat_increment"]
         starting_price = data["starting_price"]
@@ -663,14 +673,14 @@ async def create_bot(callback: CallbackQuery, state: FSMContext, db: AsyncSessio
             f"💵 <b>Требуется средств:</b>\n"
             f"• Buy ордера: {buy_count} × ${order_size:,.2f} = ${buy_count * order_size:,.2f}\n"
             f"• Sell ордера: {sell_count} × ${order_size:,.2f} = ${sell_count * order_size:,.2f}\n"
-            f"• <b>Всего: ${total_required:,.2f} USDT</b>\n\n"
-            f"💼 Доступно: ${usdt_balance:,.2f} USDT\n"
+            f"• <b>Всего: ${total_required:,.2f} {quote_currency}</b>\n\n"
+            f"💼 Доступно: ${quote_balance:,.2f} {quote_currency}\n"
         )
 
-        if usdt_balance < total_required:
+        if quote_balance < total_required:
             text += (
                 f"\n❌ <b>Недостаточно средств!</b>\n"
-                f"Не хватает: ${total_required - usdt_balance:,.2f} USDT\n\n"
+                f"Не хватает: ${total_required - quote_balance:,.2f} {quote_currency}\n\n"
                 f"Пополните баланс или уменьшите параметры бота."
             )
             await callback.message.edit_text(
