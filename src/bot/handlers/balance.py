@@ -9,32 +9,81 @@ import logging
 from src.models.user import User
 from src.services.mexc_service import MEXCService
 from src.bot.keyboards.inline import get_back_button
+from src.utils.cache import price_cache
 
 logger = logging.getLogger(__name__)
 
 router = Router()
 
 
-async def get_usd_price(mexc_service: MEXCService, symbol: str) -> Decimal:
-    """Get USD price for a cryptocurrency symbol."""
-    # Stablecoins are always 1 USD
-    stablecoins = ['USDT', 'USDC', 'BUSD', 'DAI', 'TUSD', 'USDD', 'FDUSD']
-    if symbol in stablecoins:
-        return Decimal('1.0')
+async def get_usd_prices_batch(mexc_service: MEXCService, symbols: list) -> dict:
+    """
+    Get USD prices for multiple symbols efficiently.
+    Uses cache and batch API requests.
 
-    # Try to get price from MEXC
+    Args:
+        mexc_service: MEXC service instance
+        symbols: List of cryptocurrency symbols (e.g., ['BTC', 'ETH', 'SOL'])
+
+    Returns:
+        Dictionary of {symbol: price_in_usd}
+    """
+    stablecoins = ['USDT', 'USDC', 'BUSD', 'DAI', 'TUSD', 'USDD', 'FDUSD']
+    prices = {}
+    symbols_to_fetch = []
+
+    # First pass: check cache and handle stablecoins
+    for symbol in symbols:
+        if symbol in stablecoins:
+            prices[symbol] = Decimal('1.0')
+            continue
+
+        # Check cache
+        cache_key = f"usd_price:{symbol}"
+        cached_price = price_cache.get(cache_key)
+        if cached_price is not None:
+            prices[symbol] = cached_price
+        else:
+            symbols_to_fetch.append(symbol)
+
+    # If all prices are cached, return immediately
+    if not symbols_to_fetch:
+        return prices
+
+    # Build trading pairs to fetch (try /USDT first)
+    pairs_to_fetch = [f"{symbol}/USDT" for symbol in symbols_to_fetch]
+
     try:
-        # Try SYMBOL/USDT pair
-        price = await mexc_service.get_current_price(f"{symbol}/USDT")
-        return price
-    except:
-        try:
-            # Try SYMBOL/USDC pair
-            price = await mexc_service.get_current_price(f"{symbol}/USDC")
-            return price
-        except:
-            # If no price available, return 0
-            return Decimal('0')
+        # Fetch all prices in ONE API call (much faster!)
+        batch_prices = await mexc_service.get_multiple_prices(pairs_to_fetch)
+
+        # Process results
+        for symbol in symbols_to_fetch:
+            pair = f"{symbol}/USDT"
+            if pair in batch_prices:
+                price = batch_prices[pair]
+                prices[symbol] = price
+                # Cache for 60 seconds
+                price_cache.set(f"usd_price:{symbol}", price)
+            else:
+                # Try USDC pair as fallback
+                try:
+                    usdc_pair = f"{symbol}/USDC"
+                    price = await mexc_service.get_current_price(usdc_pair)
+                    prices[symbol] = price
+                    price_cache.set(f"usd_price:{symbol}", price)
+                except:
+                    # Price not available
+                    prices[symbol] = Decimal('0')
+
+    except Exception as e:
+        logger.error(f"Error fetching batch prices: {e}")
+        # Fallback: set remaining to 0
+        for symbol in symbols_to_fetch:
+            if symbol not in prices:
+                prices[symbol] = Decimal('0')
+
+    return prices
 
 
 def format_usd(value: float) -> str:
@@ -123,40 +172,33 @@ async def show_balance(callback: CallbackQuery, db: AsyncSession):
                 "Пополните счет на MEXC для начала торговли."
             )
         else:
-            # Get USD prices for all assets in parallel
-            import asyncio
+            # Get all symbols
+            symbols = list(non_zero_balances.keys())
 
-            async def get_asset_info(symbol: str, amount: Decimal) -> dict:
-                """Get asset info with USD price."""
-                usd_price = await get_usd_price(mexc_service, symbol)
+            # Fetch all USD prices in ONE batch request (with cache!)
+            # This is MUCH faster than individual requests
+            usd_prices = await get_usd_prices_batch(mexc_service, symbols)
+
+            # Calculate USD values for each asset
+            assets_with_usd = []
+            total_usd = Decimal('0')
+
+            for symbol, amount in non_zero_balances.items():
+                usd_price = usd_prices.get(symbol, Decimal('0'))
                 usd_value = Decimal(str(amount)) * usd_price
-                return {
+                total_usd += usd_value
+
+                assets_with_usd.append({
                     'symbol': symbol,
                     'amount': amount,
                     'usd_value': float(usd_value)
-                }
-
-            # Fetch all prices in parallel (much faster!)
-            tasks = [
-                get_asset_info(symbol, amount)
-                for symbol, amount in non_zero_balances.items()
-            ]
-            assets_with_usd = await asyncio.gather(*tasks, return_exceptions=True)
-
-            # Filter out any errors
-            assets_with_usd = [
-                asset for asset in assets_with_usd
-                if not isinstance(asset, Exception)
-            ]
-
-            # Calculate total
-            total_usd = sum(asset['usd_value'] for asset in assets_with_usd)
+                })
 
             # Sort by USD value (highest first)
             assets_with_usd.sort(key=lambda x: x['usd_value'], reverse=True)
 
             # Build message
-            text = f"💼 Баланс: ${format_usd(total_usd)}\n\n"
+            text = f"💼 Баланс: ${format_usd(float(total_usd))}\n\n"
             text += "Активы:\n"
 
             for asset in assets_with_usd:

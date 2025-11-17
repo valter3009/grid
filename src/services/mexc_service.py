@@ -10,6 +10,7 @@ from src.models.user import User
 from src.core.security import security
 from src.utils.helpers import parse_decimal, retry_async, split_symbol
 from src.utils.validators import ValidationError
+from src.utils.cache import price_cache
 
 logger = logging.getLogger(__name__)
 
@@ -180,12 +181,13 @@ class MEXCService:
             if exchange:
                 await exchange.close()
 
-    async def get_current_price(self, symbol: str) -> Decimal:
+    async def get_current_price(self, symbol: str, use_cache: bool = True) -> Decimal:
         """
         Get current price for trading pair.
 
         Args:
             symbol: Trading pair (e.g., BTC/USDT)
+            use_cache: Whether to use cached price (default: True)
 
         Returns:
             Current price
@@ -193,6 +195,13 @@ class MEXCService:
         Raises:
             MEXCError: If API call fails
         """
+        # Check cache first (if enabled)
+        if use_cache:
+            cache_key = f"price:{symbol}"
+            cached_price = price_cache.get(cache_key)
+            if cached_price is not None:
+                return cached_price
+
         exchange = None
         try:
             # Use public API (no auth needed)
@@ -209,7 +218,13 @@ class MEXCService:
             if not price:
                 raise MEXCError(f"Не удалось получить цену для {symbol}")
 
-            return parse_decimal(price)
+            price_decimal = parse_decimal(price)
+
+            # Cache for 60 seconds
+            if use_cache:
+                price_cache.set(f"price:{symbol}", price_decimal)
+
+            return price_decimal
 
         except ccxt.BadSymbol as e:
             logger.error(f"Invalid symbol {symbol}: {e}")
@@ -218,6 +233,53 @@ class MEXCService:
         except Exception as e:
             logger.error(f"Error getting price for {symbol}: {e}")
             raise MEXCError(f"Ошибка получения цены: {str(e)}")
+
+        finally:
+            if exchange:
+                await exchange.close()
+
+    async def get_multiple_prices(self, symbols: List[str]) -> dict:
+        """
+        Get current prices for multiple trading pairs in one request.
+        Much faster than calling get_current_price() for each symbol.
+
+        Args:
+            symbols: List of trading pairs (e.g., ['BTC/USDT', 'ETH/USDT'])
+
+        Returns:
+            Dictionary of {symbol: price}
+
+        Raises:
+            MEXCError: If API call fails
+        """
+        exchange = None
+        try:
+            # Use public API (no auth needed)
+            exchange = ccxt.mexc({'enableRateLimit': True})
+
+            # Fetch all tickers at once (one API call!)
+            tickers = await retry_async(
+                exchange.fetch_tickers,
+                symbols,
+                max_retries=3,
+                exceptions=(ccxt.NetworkError,)
+            )
+
+            # Extract prices
+            prices = {}
+            for symbol in symbols:
+                if symbol in tickers:
+                    ticker = tickers[symbol]
+                    price = ticker.get('last') or ticker.get('close')
+                    if price:
+                        prices[symbol] = parse_decimal(price)
+
+            return prices
+
+        except Exception as e:
+            logger.error(f"Error getting multiple prices: {e}")
+            # Return empty dict, let caller handle missing prices
+            return {}
 
         finally:
             if exchange:
