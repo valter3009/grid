@@ -329,11 +329,45 @@ class MEXCService:
 
             market = exchange.markets[symbol]
 
+            # Log full market info to debug precision issues
+            logger.info(
+                f"[MEXC MARKET INFO] {symbol}:\n"
+                f"  precision: {market.get('precision')}\n"
+                f"  limits: {market.get('limits')}\n"
+                f"  info keys: {list(market.get('info', {}).keys())}"
+            )
+
+            # CRITICAL FIX: Check if MEXC provides more granular precision in raw 'info'
+            # Some exchanges provide step size in the raw API response
+            raw_info = market.get('info', {})
+            amount_step = raw_info.get('quantityPrecision') or raw_info.get('baseAssetPrecision')
+
+            # Get precision from CCXT normalized data
+            amount_precision_ccxt = market.get('precision', {}).get('amount', 8)
+            price_precision_ccxt = market.get('precision', {}).get('price', 8)
+
+            # Use raw precision if available and more granular
+            if amount_step is not None:
+                try:
+                    amount_step_decimal = Decimal(str(amount_step))
+                    logger.info(f"[MEXC] Found raw amount step: {amount_step_decimal}")
+                    # Convert to decimal places if it's an integer
+                    if isinstance(amount_step, int) and amount_step >= 1:
+                        amount_precision = amount_step  # It's decimal places
+                    else:
+                        amount_precision = amount_step_decimal  # It's a step size
+                except:
+                    amount_precision = amount_precision_ccxt
+            else:
+                amount_precision = amount_precision_ccxt
+
+            logger.info(f"[MEXC] Final amount_precision for {symbol}: {amount_precision}")
+
             return {
                 'min_order_amount': parse_decimal(market['limits']['amount']['min']),
                 'min_order_cost': parse_decimal(market['limits']['cost']['min']),
-                'price_precision': market.get('precision', {}).get('price', 8),
-                'amount_precision': market.get('precision', {}).get('amount', 8),
+                'price_precision': price_precision_ccxt,
+                'amount_precision': amount_precision,
                 'limits': market['limits'],
                 'active': market.get('active', True),
                 'symbol': symbol,
