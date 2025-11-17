@@ -3,6 +3,7 @@ from decimal import Decimal
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime
 import logging
+import math
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,6 +15,43 @@ from src.utils.helpers import parse_decimal, round_down, split_symbol
 from src.utils.validators import validate_price_range, validate_grid_levels
 
 logger = logging.getLogger(__name__)
+
+
+def _get_precision_unit(amount_precision) -> Decimal:
+    """
+    Calculate precision unit from either decimal places (int) or step size (float).
+
+    Args:
+        amount_precision: Either number of decimal places (int >= 1) or step size (float < 1)
+
+    Returns:
+        Precision unit as Decimal (e.g., 0.001 for 3 decimal places)
+
+    Examples:
+        >>> _get_precision_unit(3)  # 3 decimal places
+        Decimal('0.001')
+        >>> _get_precision_unit(0.001)  # step size of 0.001
+        Decimal('0.001')
+        >>> _get_precision_unit(8)  # 8 decimal places
+        Decimal('0.00000001')
+    """
+    # Convert to float for comparison
+    precision_value = float(amount_precision)
+
+    # If precision is >= 1, it's the number of decimal places (int)
+    if precision_value >= 1:
+        decimal_places = int(precision_value)
+    else:
+        # If precision is < 1, it's a step size (float), calculate decimal places
+        # For 0.001: log10(0.001) = -3, so decimal_places = 3
+        # For 0.01: log10(0.01) = -2, so decimal_places = 2
+        if precision_value > 0:
+            decimal_places = -int(math.floor(math.log10(precision_value)))
+        else:
+            # Edge case: if precision is 0 or invalid, default to 8
+            decimal_places = 8
+
+    return Decimal('10') ** -decimal_places
 
 
 class GridStrategyError(Exception):
@@ -131,7 +169,7 @@ class GridStrategy:
                 # Round up to next precision to ensure we meet minimum cost
                 amount = round_down(amount, amount_precision)
                 # Add one more unit of precision to be safe
-                precision_unit = Decimal('10') ** -int(amount_precision)
+                precision_unit = _get_precision_unit(amount_precision)
                 amount = amount + precision_unit
 
                 logger.info(
@@ -162,7 +200,7 @@ class GridStrategy:
                 # Round up to next precision to ensure we meet minimum cost
                 amount = round_down(amount, amount_precision)
                 # Add one more unit of precision to be safe
-                precision_unit = Decimal('10') ** -int(amount_precision)
+                precision_unit = _get_precision_unit(amount_precision)
                 amount = amount + precision_unit
 
                 logger.info(

@@ -41,6 +41,12 @@ def round_down(value: Decimal, precision) -> Decimal:
 
     Returns:
         Rounded value
+
+    Examples:
+        >>> round_down(Decimal('0.0382'), 3)  # 3 decimal places
+        Decimal('0.038')
+        >>> round_down(Decimal('0.0382'), 0.001)  # step size 0.001
+        Decimal('0.038')
     """
     # Handle both formats:
     # - precision as int (number of decimal places): 8 -> 0.00000001
