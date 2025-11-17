@@ -54,6 +54,63 @@ def _get_precision_unit(amount_precision) -> Decimal:
     return Decimal('10') ** -decimal_places
 
 
+def calculate_order_amount_for_cost(
+    order_size: Decimal,
+    price: Decimal,
+    amount_precision,
+    min_order_amount: Decimal
+) -> Decimal:
+    """
+    Calculate order amount to achieve EXACT cost in quote currency.
+
+    This ensures all orders have the same cost in quote currency (e.g., 5 USDT),
+    while the amount in base currency (e.g., SOL) varies by price level.
+
+    Args:
+        order_size: Target cost in quote currency (e.g., 5 USDT)
+        price: Order price (e.g., 130.5 USDT/SOL)
+        amount_precision: Exchange precision for amount
+        min_order_amount: Minimum order amount
+
+    Returns:
+        Amount in base currency that will cost >= order_size in quote currency
+
+    Example:
+        order_size = 5 USDT, price = 130 USDT/SOL
+        Initial amount = 5 / 130 = 0.0384615 SOL
+        After round_down(0.001) = 0.038 SOL → cost = 4.94 USDT ❌
+        After adjustment = 0.039 SOL → cost = 5.07 USDT ✓
+    """
+    # Calculate ideal amount
+    amount = order_size / price
+
+    # Round down to exchange precision
+    amount = round_down(amount, amount_precision)
+
+    # Determine precision step
+    if isinstance(amount_precision, (float, Decimal)):
+        precision_step = Decimal(str(amount_precision))
+    else:
+        precision_step = Decimal('10') ** -int(amount_precision)
+
+    # CRITICAL: Increase amount until cost >= order_size
+    # This ensures consistent cost in quote currency across all orders
+    cost = amount * price
+    max_iterations = 100  # Safety check
+    iterations = 0
+
+    while cost < order_size and iterations < max_iterations:
+        amount += precision_step
+        cost = amount * price
+        iterations += 1
+
+    # Ensure amount meets exchange minimum requirement
+    if amount < min_order_amount:
+        amount = min_order_amount
+
+    return amount
+
+
 class GridStrategyError(Exception):
     """Grid strategy error."""
     pass
@@ -152,31 +209,13 @@ class GridStrategy:
         # Calculate amounts for buy orders (lower price levels)
         for i in range(num_buy_levels):
             price = price_levels[i]
-            # Each order should have the same USDT value (order_size)
-            amount = order_size / price
-            amount = round_down(amount, amount_precision)
-
-            # Ensure amount meets minimum requirement
-            if amount < min_order_amount:
-                amount = min_order_amount
-
-            # Also ensure the order cost meets the order_size
-            # If amount * price < order_size, increase amount
-            order_cost = amount * price
-            if order_cost < order_size:
-                # Recalculate amount to meet exact order_size
-                amount = order_size / price
-                # Round up to next precision to ensure we meet minimum cost
-                amount = round_down(amount, amount_precision)
-                # Add one more unit of precision to be safe
-                precision_unit = _get_precision_unit(amount_precision)
-                amount = amount + precision_unit
-
-                logger.info(
-                    f"Adjusted amount to {amount} to meet order_size ${order_size} "
-                    f"at price ${price}"
-                )
-
+            # Calculate amount to achieve exact cost in quote currency
+            amount = calculate_order_amount_for_cost(
+                order_size=order_size,
+                price=price,
+                amount_precision=amount_precision,
+                min_order_amount=min_order_amount
+            )
             amounts[i] = amount
 
         # Calculate amounts for sell orders (higher price levels)
@@ -184,30 +223,13 @@ class GridStrategy:
         for i in range(num_sell_levels):
             level_idx = num_buy_levels + i
             price = price_levels[level_idx]
-            # Each order should have the same USDT value (order_size)
-            amount = order_size / price
-            amount = round_down(amount, amount_precision)
-
-            # Ensure amount meets minimum requirement
-            if amount < min_order_amount:
-                amount = min_order_amount
-
-            # Also ensure the order cost meets the order_size
-            order_cost = amount * price
-            if order_cost < order_size:
-                # Recalculate amount to meet exact order_size
-                amount = order_size / price
-                # Round up to next precision to ensure we meet minimum cost
-                amount = round_down(amount, amount_precision)
-                # Add one more unit of precision to be safe
-                precision_unit = _get_precision_unit(amount_precision)
-                amount = amount + precision_unit
-
-                logger.info(
-                    f"Adjusted amount to {amount} to meet order_size ${order_size} "
-                    f"at price ${price}"
-                )
-
+            # Calculate amount to achieve exact cost in quote currency
+            amount = calculate_order_amount_for_cost(
+                order_size=order_size,
+                price=price,
+                amount_precision=amount_precision,
+                min_order_amount=min_order_amount
+            )
             amounts[level_idx] = amount
 
         return amounts
@@ -339,8 +361,8 @@ class GridStrategy:
             # Buy base currency for sell orders if needed
             if total_sell_amount > 0:
                 try:
-                    # Add 2% buffer for safety (to cover fees and slippage)
-                    buy_amount = total_sell_amount * Decimal('1.02')
+                    # Add 3% buffer for safety (to cover fees and slippage)
+                    buy_amount = total_sell_amount * Decimal('1.03')
                     buy_amount = round_down(buy_amount, amount_precision)
 
                     # Ensure buy_amount is not zero
@@ -508,23 +530,13 @@ class GridStrategy:
                 price = starting_price - (bot.flat_increment * Decimal(str(i)))
                 price = round_down(price, price_precision)
 
-                # Calculate amount: order_size / price
-                amount = bot.order_size / price
-                amount = round_down(amount, amount_precision)
-
-                # CRITICAL: Ensure cost (amount * price) equals order_size in quote currency
-                cost = amount * price
-                if cost < bot.order_size:
-                    # Round up by one precision step to meet exact order_size
-                    if isinstance(amount_precision, (float, Decimal)):
-                        precision_step = Decimal(str(amount_precision))
-                    else:
-                        precision_step = Decimal('10') ** -int(amount_precision)
-                    amount = amount + precision_step
-
-                # Ensure amount meets exchange minimum requirement
-                if amount < min_order_amount:
-                    amount = min_order_amount
+                # Calculate amount to achieve exact cost in quote currency
+                amount = calculate_order_amount_for_cost(
+                    order_size=bot.order_size,
+                    price=price,
+                    amount_precision=amount_precision,
+                    min_order_amount=min_order_amount
+                )
 
                 buy_order_params.append({
                     'level': i,
@@ -585,20 +597,24 @@ class GridStrategy:
             logger.info(f"Created {len(buy_orders)}/{len(buy_order_params)} buy orders successfully")
 
             # Calculate total amount needed for sell orders
+            # Use same calculation method to ensure accuracy
             total_sell_amount = Decimal('0')
             for i in range(1, bot.sell_orders_count + 1):
                 price = starting_price + (bot.flat_increment * Decimal(str(i)))
-                amount = bot.order_size / price
-                amount = round_down(amount, amount_precision)
-                if amount < min_order_amount:
-                    amount = min_order_amount
+                price = round_down(price, price_precision)
+                amount = calculate_order_amount_for_cost(
+                    order_size=bot.order_size,
+                    price=price,
+                    amount_precision=amount_precision,
+                    min_order_amount=min_order_amount
+                )
                 total_sell_amount += amount
 
             # Buy base currency for sell orders if needed
             if total_sell_amount > 0:
                 try:
-                    # Add 2% buffer for safety (to cover fees and slippage)
-                    buy_amount = total_sell_amount * Decimal('1.02')
+                    # Add 3% buffer for safety (to cover fees and slippage)
+                    buy_amount = total_sell_amount * Decimal('1.03')
                     buy_amount = round_down(buy_amount, amount_precision)
 
                     # Ensure buy_amount is not zero
@@ -647,23 +663,13 @@ class GridStrategy:
                     price = starting_price + (bot.flat_increment * Decimal(str(i)))
                     price = round_down(price, price_precision)
 
-                    # Calculate amount: order_size / price
-                    amount = bot.order_size / price
-                    amount = round_down(amount, amount_precision)
-
-                    # CRITICAL: Ensure cost (amount * price) equals order_size in quote currency
-                    cost = amount * price
-                    if cost < bot.order_size:
-                        # Round up by one precision step to meet exact order_size
-                        if isinstance(amount_precision, (float, Decimal)):
-                            precision_step = Decimal(str(amount_precision))
-                        else:
-                            precision_step = Decimal('10') ** -int(amount_precision)
-                        amount = amount + precision_step
-
-                    # Ensure amount meets exchange minimum requirement
-                    if amount < min_order_amount:
-                        amount = min_order_amount
+                    # Calculate amount to achieve exact cost in quote currency
+                    amount = calculate_order_amount_for_cost(
+                        order_size=bot.order_size,
+                        price=price,
+                        amount_precision=amount_precision,
+                        min_order_amount=min_order_amount
+                    )
 
                     sell_order_params.append({
                         'level': i,
@@ -809,13 +815,13 @@ class GridStrategy:
                 sell_price = order.price + bot.flat_spread
                 sell_price = round_down(sell_price, price_precision)
 
-                # Calculate amount based on order_size / price
-                sell_amount = bot.order_size / sell_price
-                sell_amount = round_down(sell_amount, amount_precision)
-
-                # Ensure amount meets minimum requirement
-                if sell_amount < min_order_amount:
-                    sell_amount = min_order_amount
+                # Calculate amount to achieve exact cost in quote currency
+                sell_amount = calculate_order_amount_for_cost(
+                    order_size=bot.order_size,
+                    price=sell_price,
+                    amount_precision=amount_precision,
+                    min_order_amount=min_order_amount
+                )
 
                 try:
                     # Create sell order
@@ -862,13 +868,13 @@ class GridStrategy:
                         f"Calculated buy price {buy_price} is <= 0, skipping buy order creation"
                     )
                 else:
-                    # Calculate amount based on order_size / price
-                    buy_amount = bot.order_size / buy_price
-                    buy_amount = round_down(buy_amount, amount_precision)
-
-                    # Ensure amount meets minimum requirement
-                    if buy_amount < min_order_amount:
-                        buy_amount = min_order_amount
+                    # Calculate amount to achieve exact cost in quote currency
+                    buy_amount = calculate_order_amount_for_cost(
+                        order_size=bot.order_size,
+                        price=buy_price,
+                        amount_precision=amount_precision,
+                        min_order_amount=min_order_amount
+                    )
 
                     try:
                         # Create buy order
