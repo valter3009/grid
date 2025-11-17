@@ -3,7 +3,6 @@ from decimal import Decimal, ROUND_DOWN
 from typing import Optional, List
 import asyncio
 import logging
-import math
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +37,7 @@ def round_down(value: Decimal, precision) -> Decimal:
 
     Args:
         value: Value to round
-        precision: Either number of decimal places (int >= 1) or step size (float < 1)
+        precision: Number of decimal places (int) OR step size (Decimal/float)
 
     Returns:
         Rounded value
@@ -49,23 +48,19 @@ def round_down(value: Decimal, precision) -> Decimal:
         >>> round_down(Decimal('0.0382'), 0.001)  # step size 0.001
         Decimal('0.038')
     """
-    # Convert to float for comparison
-    precision_value = float(precision)
-
-    # If precision is >= 1, it's the number of decimal places (int)
-    if precision_value >= 1:
-        decimal_places = int(precision_value)
+    # Handle both formats:
+    # - precision as int (number of decimal places): 8 -> 0.00000001
+    # - precision as decimal step: 0.001 -> 0.001
+    if isinstance(precision, Decimal):
+        quantize_value = precision
+    elif isinstance(precision, float) and precision < 1:
+        # It's a step size like 0.001, not decimal places
+        quantize_value = Decimal(str(precision))
     else:
-        # If precision is < 1, it's a step size (float), calculate decimal places
-        # For 0.001: log10(0.001) = -3, so decimal_places = 3
-        # For 0.01: log10(0.01) = -2, so decimal_places = 2
-        if precision_value > 0:
-            decimal_places = -int(math.floor(math.log10(precision_value)))
-        else:
-            # Edge case: if precision is 0 or invalid, default to 8
-            decimal_places = 8
+        # It's number of decimal places (int or float >= 1)
+        precision = int(precision)
+        quantize_value = Decimal(10) ** -precision
 
-    quantize_value = Decimal(10) ** -decimal_places
     return value.quantize(quantize_value, rounding=ROUND_DOWN)
 
 
