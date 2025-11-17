@@ -512,7 +512,17 @@ class GridStrategy:
                 amount = bot.order_size / price
                 amount = round_down(amount, amount_precision)
 
-                # Ensure amount meets minimum requirement
+                # CRITICAL: Ensure cost (amount * price) equals order_size in quote currency
+                cost = amount * price
+                if cost < bot.order_size:
+                    # Round up by one precision step to meet exact order_size
+                    if isinstance(amount_precision, (float, Decimal)):
+                        precision_step = Decimal(str(amount_precision))
+                    else:
+                        precision_step = Decimal('10') ** -int(amount_precision)
+                    amount = amount + precision_step
+
+                # Ensure amount meets exchange minimum requirement
                 if amount < min_order_amount:
                     amount = min_order_amount
 
@@ -641,7 +651,17 @@ class GridStrategy:
                     amount = bot.order_size / price
                     amount = round_down(amount, amount_precision)
 
-                    # Ensure amount meets minimum requirement
+                    # CRITICAL: Ensure cost (amount * price) equals order_size in quote currency
+                    cost = amount * price
+                    if cost < bot.order_size:
+                        # Round up by one precision step to meet exact order_size
+                        if isinstance(amount_precision, (float, Decimal)):
+                            precision_step = Decimal(str(amount_precision))
+                        else:
+                            precision_step = Decimal('10') ** -int(amount_precision)
+                        amount = amount + precision_step
+
+                    # Ensure amount meets exchange minimum requirement
                     if amount < min_order_amount:
                         amount = min_order_amount
 

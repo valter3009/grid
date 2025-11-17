@@ -604,11 +604,8 @@ async def process_starting_price(message: Message, state: FSMContext):
 @router.callback_query(F.data == "config:order_size", CreateGridBot.configuring)
 async def config_order_size(callback: CallbackQuery, state: FSMContext, db: AsyncSession):
     """Configure order size."""
-    # Get user balance
-    result = await db.execute(
-        select(User).where(User.telegram_id == callback.from_user.id)
-    )
-    user = result.scalar_one_or_none()
+    # Answer callback immediately to avoid timeout
+    await callback.answer()
 
     # Get quote currency from selected pair
     data = await state.get_data()
@@ -616,12 +613,8 @@ async def config_order_size(callback: CallbackQuery, state: FSMContext, db: Asyn
     if 'pair' in data:
         quote_currency = get_quote_currency(data['pair'])
 
-    mexc_service = MEXCService(db)
-    balances = await mexc_service.get_balance(user.id)
-    balance = balances.get(quote_currency, 0)
-
+    # Show instruction text immediately (don't wait for balance)
     text = INSTRUCTIONS["order_size"]
-    text += f"\n💼 Доступно на балансе: {format_currency(float(balance), quote_currency)} {quote_currency}"
 
     await callback.message.edit_text(
         text,
@@ -629,7 +622,6 @@ async def config_order_size(callback: CallbackQuery, state: FSMContext, db: Asyn
         parse_mode="HTML"
     )
     await state.set_state(CreateGridBot.waiting_for_order_size)
-    await callback.answer()
 
 
 @router.message(F.text, CreateGridBot.waiting_for_order_size)

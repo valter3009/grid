@@ -3,6 +3,7 @@ from decimal import Decimal
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 import logging
+import asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -350,8 +351,9 @@ class BotManager:
 
             cancelled_count = 0
 
-            # Cancel all open orders from DB
-            for order in open_orders:
+            # Cancel all open orders from DB (in parallel for speed!)
+            async def cancel_single_order(order):
+                """Cancel a single order and update its status."""
                 try:
                     await self.mexc.cancel_order(
                         user_id=bot.user_id,
@@ -361,18 +363,38 @@ class BotManager:
 
                     order.status = 'cancelled'
                     order.cancelled_at = datetime.utcnow()
-                    cancelled_count += 1
                     logger.info(f"Cancelled order {order.exchange_order_id} on exchange")
+                    return True
 
                 except MEXCError as e:
                     logger.warning(f"Failed to cancel order {order.id}: {e}")
-                    # Continue with other orders
+                    return False
+
+            # Use rate limiting to avoid overwhelming the exchange
+            semaphore = asyncio.Semaphore(10)  # Max 10 concurrent cancellations
+
+            async def cancel_with_limit(order):
+                async with semaphore:
+                    return await cancel_single_order(order)
+
+            # Execute all cancellations in parallel
+            if open_orders:
+                logger.info(f"Cancelling {len(open_orders)} orders in parallel...")
+                results = await asyncio.gather(*[
+                    cancel_with_limit(order) for order in open_orders
+                ], return_exceptions=True)
+
+                # Count successful cancellations
+                cancelled_count = sum(1 for r in results if r is True)
 
             # Also cancel any orphaned orders on exchange (not in DB)
             try:
                 exchange_orders = await self.mexc.get_open_orders(bot.user_id, bot.symbol)
+
+                # Find orphaned orders (on exchange but not in our DB)
+                orphaned_order_ids = []
                 for exchange_order in exchange_orders:
-                    order_id = exchange_order.get('order_id')  # Correct field name
+                    order_id = exchange_order.get('order_id')
                     if not order_id:
                         logger.warning(f"Exchange order missing ID: {exchange_order}")
                         continue
@@ -382,16 +404,35 @@ class BotManager:
                         o.exchange_order_id == order_id for o in open_orders
                     )
                     if not already_cancelled:
+                        orphaned_order_ids.append(order_id)
+
+                # Cancel orphaned orders in parallel
+                if orphaned_order_ids:
+                    logger.info(f"Found {len(orphaned_order_ids)} orphaned orders, cancelling in parallel...")
+
+                    async def cancel_orphaned(order_id):
                         try:
                             await self.mexc.cancel_order(
                                 user_id=bot.user_id,
                                 symbol=bot.symbol,
                                 order_id=order_id
                             )
-                            cancelled_count += 1
                             logger.info(f"Cancelled orphaned order {order_id} on exchange")
+                            return True
                         except MEXCError as e:
                             logger.warning(f"Failed to cancel orphaned order {order_id}: {e}")
+                            return False
+
+                    async def cancel_orphaned_with_limit(order_id):
+                        async with semaphore:
+                            return await cancel_orphaned(order_id)
+
+                    orphaned_results = await asyncio.gather(*[
+                        cancel_orphaned_with_limit(order_id) for order_id in orphaned_order_ids
+                    ], return_exceptions=True)
+
+                    cancelled_count += sum(1 for r in orphaned_results if r is True)
+
             except Exception as e:
                 logger.warning(f"Failed to check exchange orders: {e}")
 
