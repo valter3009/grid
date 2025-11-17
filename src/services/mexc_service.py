@@ -138,12 +138,13 @@ class MEXCService:
             if exchange:
                 await exchange.close()
 
-    async def get_balance(self, user_id: int) -> Dict[str, Decimal]:
+    async def get_balance(self, user_id: int, use_cache: bool = True) -> Dict[str, Decimal]:
         """
         Get user balance from MEXC.
 
         Args:
             user_id: User ID
+            use_cache: Whether to use cached balance (default: True)
 
         Returns:
             Dictionary of {currency: amount}
@@ -151,6 +152,14 @@ class MEXCService:
         Raises:
             MEXCError: If API call fails
         """
+        # Check cache first (if enabled)
+        if use_cache:
+            cache_key = f"balance:{user_id}"
+            cached_balance = price_cache.get(cache_key)
+            if cached_balance is not None:
+                logger.debug(f"Balance cache HIT for user {user_id}")
+                return cached_balance
+
         exchange = None
         try:
             exchange = await self._get_exchange(user_id)
@@ -166,6 +175,11 @@ class MEXCService:
             for currency, amount in balance_data.get('total', {}).items():
                 if amount and amount > 0:
                     balances[currency] = parse_decimal(amount)
+
+            # Cache balance for 30 seconds (balances change less frequently)
+            if use_cache:
+                price_cache.set(f"balance:{user_id}", balances)
+                logger.debug(f"Cached balance for user {user_id}")
 
             return balances
 
