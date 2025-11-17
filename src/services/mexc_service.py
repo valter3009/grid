@@ -349,13 +349,17 @@ class MEXCService:
             # Use raw precision if available and more granular
             if amount_step is not None:
                 try:
-                    amount_step_decimal = Decimal(str(amount_step))
-                    logger.info(f"[MEXC] Found raw amount step: {amount_step_decimal}")
-                    # Convert to decimal places if it's an integer
-                    if isinstance(amount_step, int) and amount_step >= 1:
-                        amount_precision = amount_step  # It's decimal places
+                    # CRITICAL: Interpret precision value correctly!
+                    # If >= 1: it's number of decimal places (e.g., 2 = 0.01 step)
+                    # If < 1: it's the step size itself (e.g., 0.01)
+                    if amount_step >= 1:
+                        # It's decimal places - convert to int
+                        amount_precision = int(amount_step)
+                        logger.info(f"[MEXC] Raw precision {amount_step} interpreted as {amount_precision} decimal places (step=0.{'0' * (amount_precision-1)}1)")
                     else:
-                        amount_precision = amount_step_decimal  # It's a step size
+                        # It's a step size - keep as Decimal
+                        amount_precision = Decimal(str(amount_step))
+                        logger.info(f"[MEXC] Raw precision {amount_step} interpreted as step size {amount_precision}")
                 except:
                     amount_precision = amount_precision_ccxt
             else:
