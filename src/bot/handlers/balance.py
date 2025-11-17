@@ -3,6 +3,7 @@ from aiogram import Router, F
 from aiogram.types import CallbackQuery
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from decimal import Decimal
 import logging
 
 from src.models.user import User
@@ -12,6 +13,53 @@ from src.bot.keyboards.inline import get_back_button
 logger = logging.getLogger(__name__)
 
 router = Router()
+
+
+async def get_usd_price(mexc_service: MEXCService, symbol: str) -> Decimal:
+    """Get USD price for a cryptocurrency symbol."""
+    # Stablecoins are always 1 USD
+    stablecoins = ['USDT', 'USDC', 'BUSD', 'DAI', 'TUSD', 'USDD', 'FDUSD']
+    if symbol in stablecoins:
+        return Decimal('1.0')
+
+    # Try to get price from MEXC
+    try:
+        # Try SYMBOL/USDT pair
+        price = await mexc_service.get_current_price(f"{symbol}/USDT")
+        return price
+    except:
+        try:
+            # Try SYMBOL/USDC pair
+            price = await mexc_service.get_current_price(f"{symbol}/USDC")
+            return price
+        except:
+            # If no price available, return 0
+            return Decimal('0')
+
+
+def format_usd(value: float) -> str:
+    """Format USD value with smart decimal places."""
+    if value >= 1:
+        # For values >= 1, show 2 decimals
+        return f"{value:,.2f}"
+    elif value >= 0.01:
+        # For values >= 0.01, show up to 4 decimals
+        return f"{value:.4f}".rstrip('0').rstrip('.')
+    else:
+        # For small values, show up to 8 decimals
+        return f"{value:.8f}".rstrip('0').rstrip('.')
+
+
+def format_amount(value: float, currency: str) -> str:
+    """Format crypto amount with smart decimal places."""
+    stablecoins = ['USDT', 'USDC', 'BUSD', 'DAI', 'TUSD', 'USDD', 'FDUSD']
+
+    if currency in stablecoins:
+        # Stablecoins: 2 decimals
+        return f"{value:.2f}"
+    else:
+        # Crypto: up to 8 decimals, trim trailing zeros
+        return f"{value:.8f}".rstrip('0').rstrip('.')
 
 
 @router.callback_query(F.data == "balance")
@@ -59,7 +107,7 @@ async def show_balance(callback: CallbackQuery, db: AsyncSession):
             await callback.answer()
             return
 
-        # Filter out zero balances and sort by value
+        # Filter out zero balances
         non_zero_balances = {
             symbol: amount for symbol, amount in balances.items()
             if amount > 0
@@ -72,23 +120,37 @@ async def show_balance(callback: CallbackQuery, db: AsyncSession):
                 "Пополните счет на MEXC для начала торговли."
             )
         else:
-            text = "💼 Баланс\n\n"
+            # Get USD prices for all assets
+            assets_with_usd = []
+            total_usd = Decimal('0')
 
-            # Show USDT first if available
-            if 'USDT' in non_zero_balances:
-                text += f"💵 USDT: {non_zero_balances['USDT']:.2f}\n\n"
+            for symbol, amount in non_zero_balances.items():
+                usd_price = await get_usd_price(mexc_service, symbol)
+                usd_value = Decimal(str(amount)) * usd_price
+                total_usd += usd_value
 
-            # Show other currencies
-            text += "Другие активы:\n"
-            for symbol, amount in sorted(non_zero_balances.items()):
-                if symbol != 'USDT':
-                    # Format amount based on size
-                    if amount >= 1:
-                        formatted_amount = f"{amount:.4f}"
-                    else:
-                        formatted_amount = f"{amount:.8f}"
+                assets_with_usd.append({
+                    'symbol': symbol,
+                    'amount': amount,
+                    'usd_value': float(usd_value)
+                })
 
-                    text += f"• {symbol}: {formatted_amount}\n"
+            # Sort by USD value (highest first)
+            assets_with_usd.sort(key=lambda x: x['usd_value'], reverse=True)
+
+            # Build message
+            text = f"💼 Баланс: ${format_usd(float(total_usd))}\n\n"
+            text += "Активы:\n"
+
+            for asset in assets_with_usd:
+                symbol = asset['symbol']
+                amount = asset['amount']
+                usd_value = asset['usd_value']
+
+                formatted_amount = format_amount(float(amount), symbol)
+                formatted_usd = format_usd(usd_value)
+
+                text += f"• {symbol}: {formatted_amount} (${formatted_usd})\n"
 
             text += f"\n📊 Всего активов: {len(non_zero_balances)}"
 

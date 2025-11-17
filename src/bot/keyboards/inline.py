@@ -3,6 +3,16 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from typing import List, Optional
 
 
+def format_number_smart(value: float) -> str:
+    """Format number: remove trailing zeros, keep significant digits."""
+    # Format with up to 8 decimals, then strip trailing zeros
+    formatted = f"{value:.8f}".rstrip('0').rstrip('.')
+    # Add thousands separator for whole part
+    parts = formatted.split('.')
+    parts[0] = f"{int(parts[0]):,}"
+    return '.'.join(parts) if len(parts) > 1 else parts[0]
+
+
 def get_main_menu_keyboard() -> InlineKeyboardMarkup:
     """Get main menu keyboard."""
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -289,11 +299,11 @@ def get_grid_config_keyboard(config: dict) -> InlineKeyboardMarkup:
     )
     spread_text = format_param(
         "flat_spread", "Спред", config.get("flat_spread"),
-        lambda x: f"${float(x):,.0f}"
+        lambda x: f"${format_number_smart(float(x))}"
     )
     increment_text = format_param(
         "flat_increment", "Шаг сетки", config.get("flat_increment"),
-        lambda x: f"${float(x):,.0f}"
+        lambda x: f"${format_number_smart(float(x))}"
     )
     buy_orders_text = format_param(
         "buy_orders_count", "Buy ордеров", config.get("buy_orders_count"),
@@ -305,11 +315,11 @@ def get_grid_config_keyboard(config: dict) -> InlineKeyboardMarkup:
     )
     starting_price_text = format_param(
         "starting_price", "Начальная цена", config.get("starting_price"),
-        lambda x: "Текущая рыночная" if float(x) == 0 else f"${float(x):,.2f}"
+        lambda x: "Текущая рыночная" if float(x) == 0 else f"${format_number_smart(float(x))}"
     )
     order_size_text = format_param(
         "order_size", "Размер ордера", config.get("order_size"),
-        lambda x: f"${float(x):,.2f}"
+        lambda x: f"${format_number_smart(float(x))}"
     )
 
     # Check if all parameters are configured
