@@ -114,6 +114,9 @@ def format_amount(value: float, currency: str) -> str:
 @router.callback_query(F.data == "balance")
 async def show_balance(callback: CallbackQuery, db: AsyncSession):
     """Show user balance."""
+    import time
+    start_time = time.time()
+
     # Answer callback immediately to avoid timeout
     await callback.answer()
 
@@ -148,8 +151,11 @@ async def show_balance(callback: CallbackQuery, db: AsyncSession):
         )
 
         # Get balance from MEXC
+        balance_start = time.time()
         mexc_service = MEXCService(db)
         balances = await mexc_service.get_balance(user.id)
+        balance_time = time.time() - balance_start
+        logger.info(f"Balance fetch took {balance_time:.2f}s")
 
         if not balances:
             await callback.message.edit_text(
@@ -176,8 +182,10 @@ async def show_balance(callback: CallbackQuery, db: AsyncSession):
             symbols = list(non_zero_balances.keys())
 
             # Fetch all USD prices in ONE batch request (with cache!)
-            # This is MUCH faster than individual requests
+            prices_start = time.time()
             usd_prices = await get_usd_prices_batch(mexc_service, symbols)
+            prices_time = time.time() - prices_start
+            logger.info(f"USD prices fetch took {prices_time:.2f}s")
 
             # Calculate USD values for each asset
             assets_with_usd = []
@@ -212,6 +220,9 @@ async def show_balance(callback: CallbackQuery, db: AsyncSession):
                 text += f"• {symbol}: {formatted_amount} (${formatted_usd})\n"
 
             text += f"\n📊 Всего активов: {len(assets_with_usd)}"
+
+        total_time = time.time() - start_time
+        logger.info(f"Total balance display took {total_time:.2f}s")
 
         await callback.message.edit_text(
             text,

@@ -500,7 +500,9 @@ class GridStrategy:
             sell_orders = []
             market_order = None
 
-            # Create BUY limit orders (below starting price)
+            # Prepare all BUY order parameters (parallel creation)
+            import asyncio
+            buy_order_params = []
             for i in range(1, bot.buy_orders_count + 1):
                 # Calculate price: starting_price - (i * flat_increment)
                 price = starting_price - (bot.flat_increment * Decimal(str(i)))
@@ -514,13 +516,21 @@ class GridStrategy:
                 if amount < min_order_amount:
                     amount = min_order_amount
 
+                buy_order_params.append({
+                    'level': i,
+                    'price': price,
+                    'amount': amount
+                })
+
+            # Create helper function to create single order
+            async def create_buy_order(params):
                 try:
                     order = await self.mexc.create_limit_order(
                         user_id=bot.user_id,
                         symbol=bot.symbol,
                         side='buy',
-                        price=price,
-                        amount=amount
+                        price=params['price'],
+                        amount=params['amount']
                     )
 
                     # Save to DB
@@ -529,23 +539,40 @@ class GridStrategy:
                         exchange_order_id=order['order_id'],
                         side='buy',
                         order_type='limit',
-                        level=i,  # Level 1, 2, 3, ...
-                        price=price,
-                        amount=amount,
-                        total=price * amount,
+                        level=params['level'],
+                        price=params['price'],
+                        amount=params['amount'],
+                        total=params['price'] * params['amount'],
                         status='open'
                     )
                     self.db.add(db_order)
-                    buy_orders.append(order)
 
                     logger.info(
-                        f"Created buy order at level {i}: "
-                        f"{amount} @ ${price} (${price * amount:.2f})"
+                        f"Created buy order at level {params['level']}: "
+                        f"{params['amount']} @ ${params['price']} (${params['price'] * params['amount']:.2f})"
                     )
+                    return order
 
                 except MEXCError as e:
-                    logger.error(f"Failed to create buy order at level {i}: {e}")
-                    # Continue with other orders
+                    logger.error(f"Failed to create buy order at level {params['level']}: {e}")
+                    return None
+
+            # Create all BUY orders in parallel (with rate limiting)
+            # MEXC allows ~20 requests/sec, we use 10 concurrent to be safe
+            semaphore = asyncio.Semaphore(10)
+
+            async def create_with_limit(params):
+                async with semaphore:
+                    return await create_buy_order(params)
+
+            # Execute all in parallel
+            buy_results = await asyncio.gather(*[
+                create_with_limit(params) for params in buy_order_params
+            ], return_exceptions=True)
+
+            # Filter successful orders
+            buy_orders = [order for order in buy_results if order and not isinstance(order, Exception)]
+            logger.info(f"Created {len(buy_orders)}/{len(buy_order_params)} buy orders successfully")
 
             # Calculate total amount needed for sell orders
             total_sell_amount = Decimal('0')
@@ -601,8 +628,10 @@ class GridStrategy:
                     logger.warning("Sell orders will not be created due to market buy failure")
                     total_sell_amount = Decimal('0')  # Skip sell order creation
 
-            # Create SELL limit orders (above starting price)
+            # Create SELL limit orders (above starting price) - PARALLEL
             if total_sell_amount > 0:
+                # Prepare all SELL order parameters
+                sell_order_params = []
                 for i in range(1, bot.sell_orders_count + 1):
                     # Calculate price: starting_price + (i * flat_increment)
                     price = starting_price + (bot.flat_increment * Decimal(str(i)))
@@ -616,13 +645,21 @@ class GridStrategy:
                     if amount < min_order_amount:
                         amount = min_order_amount
 
+                    sell_order_params.append({
+                        'level': i,
+                        'price': price,
+                        'amount': amount
+                    })
+
+                # Create helper function to create single sell order
+                async def create_sell_order(params):
                     try:
                         order = await self.mexc.create_limit_order(
                             user_id=bot.user_id,
                             symbol=bot.symbol,
                             side='sell',
-                            price=price,
-                            amount=amount
+                            price=params['price'],
+                            amount=params['amount']
                         )
 
                         # Save to DB
@@ -631,23 +668,37 @@ class GridStrategy:
                             exchange_order_id=order['order_id'],
                             side='sell',
                             order_type='limit',
-                            level=i,  # Level 1, 2, 3, ...
-                            price=price,
-                            amount=amount,
-                            total=price * amount,
+                            level=params['level'],
+                            price=params['price'],
+                            amount=params['amount'],
+                            total=params['price'] * params['amount'],
                             status='open'
                         )
                         self.db.add(db_order)
-                        sell_orders.append(order)
 
                         logger.info(
-                            f"Created sell order at level {i}: "
-                            f"{amount} @ ${price} (${price * amount:.2f})"
+                            f"Created sell order at level {params['level']}: "
+                            f"{params['amount']} @ ${params['price']} (${params['price'] * params['amount']:.2f})"
                         )
+                        return order
 
                     except MEXCError as e:
-                        logger.error(f"Failed to create sell order at level {i}: {e}")
-                        # Continue with other orders
+                        logger.error(f"Failed to create sell order at level {params['level']}: {e}")
+                        return None
+
+                # Create all SELL orders in parallel (with rate limiting)
+                async def create_sell_with_limit(params):
+                    async with semaphore:
+                        return await create_sell_order(params)
+
+                # Execute all in parallel
+                sell_results = await asyncio.gather(*[
+                    create_sell_with_limit(params) for params in sell_order_params
+                ], return_exceptions=True)
+
+                # Filter successful orders
+                sell_orders = [order for order in sell_results if order and not isinstance(order, Exception)]
+                logger.info(f"Created {len(sell_orders)}/{len(sell_order_params)} sell orders successfully")
 
             # Commit all orders to DB
             await self.db.commit()
