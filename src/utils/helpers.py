@@ -31,20 +31,30 @@ def parse_decimal(value: any, default: Decimal = Decimal('0')) -> Decimal:
         return default
 
 
-def round_down(value: Decimal, precision: int) -> Decimal:
+def round_down(value: Decimal, precision) -> Decimal:
     """
     Round down decimal to specified precision.
 
     Args:
         value: Value to round
-        precision: Number of decimal places
+        precision: Number of decimal places (int) OR step size (Decimal/float)
 
     Returns:
         Rounded value
     """
-    # Ensure precision is int (convert from float if needed)
-    precision = int(precision)
-    quantize_value = Decimal(10) ** -precision
+    # Handle both formats:
+    # - precision as int (number of decimal places): 8 -> 0.00000001
+    # - precision as decimal step: 0.001 -> 0.001
+    if isinstance(precision, Decimal):
+        quantize_value = precision
+    elif isinstance(precision, float) and precision < 1:
+        # It's a step size like 0.001, not decimal places
+        quantize_value = Decimal(str(precision))
+    else:
+        # It's number of decimal places (int or float >= 1)
+        precision = int(precision)
+        quantize_value = Decimal(10) ** -precision
+
     return value.quantize(quantize_value, rounding=ROUND_DOWN)
 
 
